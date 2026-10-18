@@ -806,6 +806,11 @@ def _validate_host(value: str) -> str:
     )
 
 
+# Saved-assembly diagnostics in the existing MCP server.
+from .assembly_diagnostics import register as _register_diagnostics
+_register_diagnostics(mcp, state)
+
+
 def main():
     """Run the MCP server"""
     import argparse
