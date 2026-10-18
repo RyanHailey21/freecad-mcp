@@ -14,10 +14,6 @@ def diagnose(path, output_dir, command=None, timeout=60, required_modules=None):
         raise ValueError('timeout must be in (0,60]')
     if command is None:
         command = detect_freecadcmd()
-        if command is None and os.name == 'nt':
-            candidates = sorted((Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs').glob('FreeCAD*/bin/freecadcmd.exe'))
-            if len(candidates) == 1:
-                command = [str(candidates[0])]
     source = Path(path).resolve(strict=True)
     if source.suffix.lower() not in ('.fcstd', '.step', '.stp'):
         raise ValueError('Supply a saved FCStd or STEP file')
@@ -75,14 +71,18 @@ finally:
         json.dump(report,f,indent=2)
 '''
     prefix = f'INPUT={str(saved)!r}\nOUTPUT={str(result_path)!r}\nMODULES={required_modules or ["Part", "Assembly"]!r}\n'
-    process = run_headless(prefix + code, timeout, command)
+    process = run_headless(prefix + code, timeout, command) if command else {'success': False, 'unsupported': True, 'error': 'Configure FREECAD_MCP_EXECUTABLE or --freecadcmd'}
     report = json.loads(result_path.read_text(encoding='utf-8')) if result_path.exists() else {}
     if not process.get('success') or not report:
-        report.update(status='timeout' if process.get('timed_out') else 'error')
+        report.update(status='unsupported' if process.get('unsupported') else 'timeout' if process.get('timed_out') else 'error')
     report.update(process=process, input_path=str(source), input_sha256=original_hash,
                   report_path=str(result_path))
     if sha(source) != original_hash:
         report.update(status='error', error='Source changed during diagnostic')
+    from .evidence import envelope
+    report['evidence'] = envelope(report, 'freecad-mcp', 'diagnose_saved_assembly', root,
+        [{'id': 'input', 'path': str(saved), 'sha256': original_hash}], [], __file__)
+    report['evidence']['versions']['FreeCAD'] = report.get('version', 'unknown')
     temp = root / 'report.tmp'
     temp.write_text(json.dumps(report, indent=2), encoding='utf-8')
     os.replace(temp, result_path)
@@ -90,6 +90,18 @@ finally:
 
 
 def register(mcp, state):
+    @mcp.tool()
+    def cad_capabilities() -> dict:
+        """Discover headless availability without launching FreeCAD or touching the GUI."""
+        from .headless import detect_freecadcmd
+        from .evidence import versions
+        command = state.freecadcmd or detect_freecadcmd()
+        return {'schema': 'cad-capabilities/1', 'producer': 'freecad-mcp',
+                'versions': versions('freecad-mcp'), 'evidence_schema': 'cad-evidence/1',
+                'operations': {'diagnose_saved_assembly': 'available' if command else 'unsupported'},
+                'command': command, 'limits': {'isolated_timeout_seconds': 60},
+                'scope': 'Executable discovery only; module imports are checked by diagnostics'}
+
     @mcp.tool()
     def diagnose_saved_assembly(path: str, output_dir: str, timeout: float = 60,
                                 required_modules: list[str] | None = None) -> dict:

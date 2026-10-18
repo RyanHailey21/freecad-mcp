@@ -26,10 +26,29 @@ _NOISE = ("%)", "Importing project files", "Postprocessing", "FreeCAD 1.", "(C) 
 
 def detect_freecadcmd() -> list[str] | None:
     """Find a headless FreeCAD executable: PATH first, then the Flatpak."""
+    explicit = os.environ.get("FREECAD_MCP_EXECUTABLE")
+    if explicit:
+        # A literal executable path avoids shell quoting problems, especially Windows spaces.
+        path = Path(explicit).expanduser()
+        return [str(path.resolve())] if path.is_file() else None
     for name in ("freecadcmd", "FreeCADCmd", "freecadcmd.exe", "freecad.cmd"):
         path = shutil.which(name)
         if path:
             return [path]
+    candidates = []
+    if os.name == "nt":
+        for variable, suffix in (("LOCALAPPDATA", "Programs"), ("ProgramFiles", "")):
+            base = os.environ.get(variable)
+            if base:
+                candidates.extend((Path(base) / suffix).glob("FreeCAD*/bin/freecadcmd.exe"))
+    elif __import__("sys").platform == "darwin":
+        candidates.extend(Path("/Applications").glob("FreeCAD*.app/Contents/Resources/bin/freecadcmd"))
+        candidates.extend(Path("/Applications").glob("FreeCAD*.app/Contents/MacOS/FreeCADCmd"))
+    candidates = sorted(set(p.resolve() for p in candidates if p.is_file()))
+    if len(candidates) == 1:
+        return [str(candidates[0])]
+    if len(candidates) > 1:
+        return None  # Require an explicit choice; do not guess a version.
     flatpak = shutil.which("flatpak")
     if flatpak:
         try:

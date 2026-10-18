@@ -36,3 +36,20 @@ class Diagnostics(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_missing_executable_is_unsupported(tmp_path):
+    p=tmp_path/'input.step';p.write_text('fixture')
+    with patch('freecad_mcp.headless.detect_freecadcmd', return_value=None):
+        report=diagnose(str(p),str(tmp_path/'out'))
+    assert report['evidence']['status']=='unsupported'
+    assert Path(report['report_path']).is_file()
+
+
+def test_explicit_executable_path_with_spaces(tmp_path, monkeypatch):
+    from freecad_mcp.headless import detect_freecadcmd
+    p=tmp_path/'FreeCAD with spaces.exe';p.write_text('fixture')
+    monkeypatch.setenv('FREECAD_MCP_EXECUTABLE',str(p))
+    assert detect_freecadcmd()==[str(p.resolve())]
+    monkeypatch.setenv('FREECAD_MCP_EXECUTABLE',str(tmp_path/'missing'))
+    assert detect_freecadcmd() is None
