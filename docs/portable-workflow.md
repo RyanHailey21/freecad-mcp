@@ -42,3 +42,6 @@ Headless diagnose_saved_assembly needs no GUI RPC connection. It imports request
 modules and reports availability; it does not activate a GUI workbench or solve
 an assembly. Required modules default to Part and Assembly; request Part alone
 for plain geometry import. Missing executables produce durable unsupported reports.
+
+Headless child processes receive closed stdin (DEVNULL). They must not inherit
+the MCP protocol pipe: that can stall FreeCAD startup under a stdio host.

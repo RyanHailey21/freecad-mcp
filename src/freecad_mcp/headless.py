@@ -106,7 +106,7 @@ def run_headless(code: str, timeout: float, command: list[str] | None) -> dict[s
     argv = command + ["-c", f"exec(open({script!r}, encoding='utf-8').read())"]
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, encoding="utf-8",
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
