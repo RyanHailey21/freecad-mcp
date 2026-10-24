@@ -37,6 +37,7 @@ from .operations import (
 from .prompt_text import ASSET_CREATION_STRATEGY
 from .responses import ToolResponse
 from .server_state import ServerState
+from .runtime_info import toolchain_status as _toolchain_status
 
 
 logging.basicConfig(
@@ -92,6 +93,25 @@ def tool(fn: Callable[..., ToolResponse]) -> Callable[..., ToolResponse]:
         return response
 
     return mcp.tool(structured_output=False)(wrapper)
+
+
+@tool
+def toolchain_status(expected_revision: str = "", probe_freecad: bool = False) -> list[TextContent]:
+    """Read running/installed revision and restart need without CAD. Optional RPC ping is bounded.
+    Does not reload documents, change preferences, or claim a configured update is running.
+    """
+    import json
+    result = _toolchain_status(expected_revision)
+    if probe_freecad:
+        connection = FreeCADConnection(host=state.rpc_host, port=9875, timeout=3, token=state.auth_token)
+        try:
+            result["freecad_rpc"] = "reachable" if connection.ping() else "not_acknowledged"
+        except Exception as exc:
+            result["freecad_rpc"] = "unavailable"
+            result["freecad_error_type"] = type(exc).__name__
+        finally:
+            connection.disconnect()
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
 def get_freecad_connection() -> FreeCADConnection:
