@@ -14,6 +14,7 @@ except ImportError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 from mcp.types import ImageContent, TextContent
 
+from .beautify import beautify_operation
 from .freecad_client import FreeCADConnection
 from .freecad_launcher import FreeCADLaunchError, ensure_freecad_running
 from .operations import (
@@ -774,6 +775,66 @@ def list_documents(ctx: Context) -> list[TextContent]:
         A list of document names.
     """
     return list_documents_operation(get_freecad_connection())
+
+
+@tool
+def beautify_model(
+    ctx: Context,
+    doc_name: str,
+    fillet_radius: float = 1.0,
+    palette: str = "workshop",
+    protect: list[str] | None = None,
+    min_edge_length: float = 4.0,
+    max_volume_change_pct: float = 5.0,
+    style_references: bool = True,
+    smooth_view: bool = True,
+    apply_camera: bool = True,
+    dry_run: bool = False,
+    include_screenshot: bool = True,
+) -> list[TextContent | ImageContent]:
+    """Make a FreeCAD model look finished: round sharp edges, colour parts by role, ghost references.
+
+    One call does the whole pass inside FreeCAD:
+    - Fillets convex straight edges between flat faces (circular edges, bores and protected objects are
+      never touched). If a fillet fails it retries with smaller radii, and a result is kept only when it is
+      a valid single solid whose volume changes by less than ``max_volume_change_pct``.
+    - Colours each part by its role, inferred from its name (jaw/finger -> accent, pad -> dark rubber,
+      rail/shaft -> metal, spring, motor/gear -> drive, mount/plate/block -> structure) with matching finish.
+    - Styles ``Ref_*`` reference objects (donut yellow, platform/floor ghosted, pole muted red).
+    - Smooths curved-surface display and frames an isometric view.
+
+    Only plain ``Part::Feature`` solids get new geometry; parametric features are reported as skipped.
+    The document is not saved. Check fits afterwards: protect mating parts and tight faces with ``protect``.
+
+    Args:
+        doc_name: Document to beautify.
+        fillet_radius: Target fillet radius in mm (0 to 10). 0 changes colours and view only.
+        palette: "workshop" (graphite + orange accent), "carbon" (dark + cyan), or "clean" (light + blue).
+        protect: Name patterns (e.g. "Pad_*") whose geometry is left alone. Default ["Ref_*"]. Reference
+            objects are always excluded from filleting.
+        min_edge_length: Ignore edges shorter than this many mm.
+        max_volume_change_pct: Reject a fillet that changes a part's volume by more than this (0-50).
+        style_references: Also recolour/ghost reference objects.
+        smooth_view: Reduce tessellation deviation so curves look round.
+        apply_camera: Switch to an isometric view and fit all.
+        dry_run: Report what would be filleted without changing anything.
+        include_screenshot: Return a screenshot after the pass.
+    """
+    return beautify_operation(
+        get_freecad_connection(),
+        state.only_text_feedback,
+        doc_name,
+        fillet_radius,
+        palette,
+        protect,
+        min_edge_length,
+        max_volume_change_pct,
+        style_references,
+        smooth_view,
+        apply_camera,
+        dry_run,
+        include_screenshot,
+    )
 
 
 @tool
