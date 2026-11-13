@@ -15,6 +15,7 @@ except ImportError:
 from mcp.types import ImageContent, TextContent
 
 from .freecad_client import FreeCADConnection
+from .freecad_launcher import FreeCADLaunchError, ensure_freecad_running
 from .operations import (
     create_document_operation,
     create_object_operation,
@@ -58,13 +59,12 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     try:
         logger.info("FreeCADMCP server starting up")
         try:
-            _ = get_freecad_connection()
+            # launch=False: FreeCAD is started on demand by the first tool
+            # call that needs it, never merely because the server started.
+            _ = get_freecad_connection(launch=False)
             logger.info("Successfully connected to FreeCAD on startup")
         except Exception as e:
-            logger.warning(f"Could not connect to FreeCAD on startup: {str(e)}")
-            logger.warning(
-                "Make sure the FreeCAD addon is running before using FreeCAD resources or tools"
-            )
+            logger.info(f"FreeCAD is not running yet ({str(e)}); it starts on first use")
         yield {}
     finally:
         if state.freecad_connection:
@@ -114,13 +114,20 @@ def toolchain_status(expected_revision: str = "", probe_freecad: bool = False) -
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
-def get_freecad_connection() -> FreeCADConnection:
+def get_freecad_connection(launch: bool = True) -> FreeCADConnection:
     """Get or create a persistent FreeCAD connection.
 
     The connection is cached only after FreeCAD answers, so a server started
     before FreeCAD checks the addon version on the first call that reaches it.
+    With ``launch`` (the default for tool calls) a FreeCAD that is not running
+    is started on demand and awaited before connecting.
     """
     if state.freecad_connection is None:
+        if launch:
+            try:
+                ensure_freecad_running(state.rpc_host, 9875, state.auth_token)
+            except FreeCADLaunchError as e:
+                raise Exception(str(e)) from e
         connection = FreeCADConnection(
             host=state.rpc_host, port=9875, token=state.auth_token
         )
@@ -150,6 +157,33 @@ def get_freecad_connection() -> FreeCADConnection:
             logger.warning(state.version_notice)
         state.freecad_connection = connection
     return state.freecad_connection
+
+
+@tool
+def start_freecad(ctx: Context, wait_seconds: float = 90) -> list[TextContent]:
+    """Start FreeCAD (and its MCP RPC server) if it is not already running.
+
+    Other FreeCAD tools start FreeCAD automatically on first use, so calling
+    this is optional; use it to open FreeCAD ahead of time or to check that it
+    comes up. It is idempotent and never opens a second instance.
+
+    Args:
+        wait_seconds: How long to wait for the RPC server after launching
+            (FreeCAD usually needs 20-40 seconds to load).
+
+    Returns:
+        "already_running" or "started" once FreeCAD answers, otherwise a
+        message explaining why it could not be started.
+    """
+    import json
+
+    try:
+        result = ensure_freecad_running(
+            state.rpc_host, 9875, state.auth_token, wait=wait_seconds
+        )
+    except FreeCADLaunchError as e:
+        return [TextContent(type="text", text=json.dumps({"status": "failed", "detail": str(e)}))]
+    return [TextContent(type="text", text=json.dumps({"status": result.status, "detail": result.detail}))]
 
 
 @tool
