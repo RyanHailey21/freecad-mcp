@@ -113,3 +113,22 @@ def test_parse_command() -> None:
     assert parse_command("flatpak run --command=freecadcmd org.freecad.FreeCAD") == [
         "flatpak", "run", "--command=freecadcmd", "org.freecad.FreeCAD",
     ]
+
+
+def test_child_does_not_inherit_open_protocol_stdin():
+    """A server has an open protocol pipe; its CAD child must see EOF instead."""
+    import json
+    import subprocess
+    code = ("import json, sys; from freecad_mcp.headless import run_headless; "
+            "print(json.dumps(run_headless('import sys; print(repr(sys.stdin.read()))', 2, [sys.executable])))")
+    parent = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        parent.wait(timeout=10)  # Deliberately leave its protocol stdin open.
+        result = json.loads(parent.stdout.read().decode())
+        assert result['success'], result
+        assert result['output'] == "''"
+    finally:
+        if parent.poll() is None:
+            parent.kill(); parent.wait()
+        parent.stdin.close(); parent.stdout.close(); parent.stderr.close()

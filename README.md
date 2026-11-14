@@ -80,3 +80,9 @@ default.
 </a>
 
 Made with [contrib.rocks](https://contrib.rocks).
+
+
+## Portable project workflows
+
+See [portable workflow capabilities and evidence](docs/portable-workflow.md) for
+pinned checkout setup, capability discovery and revision-bound job reports.

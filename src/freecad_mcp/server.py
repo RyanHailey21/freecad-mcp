@@ -14,7 +14,9 @@ except ImportError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
+from .beautify import beautify_operation
 from .freecad_client import FreeCADConnection
+from .freecad_launcher import FreeCADLaunchError, ensure_freecad_running
 from .operations import (
     create_document_operation,
     create_object_operation,
@@ -37,6 +39,7 @@ from .operations import (
 from .prompt_text import ASSET_CREATION_STRATEGY
 from .responses import ErrorResponse, ToolResponse
 from .server_state import ServerState
+from .runtime_info import toolchain_status as _toolchain_status
 
 
 logging.basicConfig(
@@ -57,13 +60,12 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     try:
         logger.info("FreeCADMCP server starting up")
         try:
-            _ = get_freecad_connection()
+            # launch=False: FreeCAD is started on demand by the first tool
+            # call that needs it, never merely because the server started.
+            _ = get_freecad_connection(launch=False)
             logger.info("Successfully connected to FreeCAD on startup")
         except Exception as e:
-            logger.warning(f"Could not connect to FreeCAD on startup: {str(e)}")
-            logger.warning(
-                "Make sure the FreeCAD addon is running before using FreeCAD resources or tools"
-            )
+            logger.info(f"FreeCAD is not running yet ({str(e)}); it starts on first use")
         yield {}
     finally:
         if state.freecad_connection:
@@ -100,13 +102,39 @@ def tool(fn: Callable[..., ToolResponse]) -> Callable[..., ToolResponse | CallTo
     return mcp.tool(structured_output=False)(wrapper)
 
 
-def get_freecad_connection() -> FreeCADConnection:
+@tool
+def toolchain_status(expected_revision: str = "", probe_freecad: bool = False) -> list[TextContent]:
+    """Read running/installed revision and restart need without CAD. Optional RPC ping is bounded.
+    Does not reload documents, change preferences, or claim a configured update is running.
+    """
+    import json
+    result = _toolchain_status(expected_revision)
+    if probe_freecad:
+        connection = FreeCADConnection(host=state.rpc_host, port=9875, timeout=3, token=state.auth_token)
+        try:
+            result["freecad_rpc"] = "reachable" if connection.ping() else "not_acknowledged"
+        except Exception as exc:
+            result["freecad_rpc"] = "unavailable"
+            result["freecad_error_type"] = type(exc).__name__
+        finally:
+            connection.disconnect()
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+def get_freecad_connection(launch: bool = True) -> FreeCADConnection:
     """Get or create a persistent FreeCAD connection.
 
     The connection is cached only after FreeCAD answers, so a server started
     before FreeCAD checks the addon version on the first call that reaches it.
+    With ``launch`` (the default for tool calls) a FreeCAD that is not running
+    is started on demand and awaited before connecting.
     """
     if state.freecad_connection is None:
+        if launch:
+            try:
+                ensure_freecad_running(state.rpc_host, 9875, state.auth_token)
+            except FreeCADLaunchError as e:
+                raise Exception(str(e)) from e
         connection = FreeCADConnection(
             host=state.rpc_host, port=9875, token=state.auth_token
         )
@@ -136,6 +164,33 @@ def get_freecad_connection() -> FreeCADConnection:
             logger.warning(state.version_notice)
         state.freecad_connection = connection
     return state.freecad_connection
+
+
+@tool
+def start_freecad(ctx: Context, wait_seconds: float = 90) -> list[TextContent]:
+    """Start FreeCAD (and its MCP RPC server) if it is not already running.
+
+    Other FreeCAD tools start FreeCAD automatically on first use, so calling
+    this is optional; use it to open FreeCAD ahead of time or to check that it
+    comes up. It is idempotent and never opens a second instance.
+
+    Args:
+        wait_seconds: How long to wait for the RPC server after launching
+            (FreeCAD usually needs 20-40 seconds to load).
+
+    Returns:
+        "already_running" or "started" once FreeCAD answers, otherwise a
+        message explaining why it could not be started.
+    """
+    import json
+
+    try:
+        result = ensure_freecad_running(
+            state.rpc_host, 9875, state.auth_token, wait=wait_seconds
+        )
+    except FreeCADLaunchError as e:
+        return [TextContent(type="text", text=json.dumps({"status": "failed", "detail": str(e)}))]
+    return [TextContent(type="text", text=json.dumps({"status": result.status, "detail": result.detail}))]
 
 
 @tool
@@ -729,6 +784,66 @@ def list_documents(ctx: Context) -> list[TextContent]:
 
 
 @tool
+def beautify_model(
+    ctx: Context,
+    doc_name: str,
+    fillet_radius: float = 1.0,
+    palette: str = "workshop",
+    protect: list[str] | None = None,
+    min_edge_length: float = 4.0,
+    max_volume_change_pct: float = 5.0,
+    style_references: bool = True,
+    smooth_view: bool = True,
+    apply_camera: bool = True,
+    dry_run: bool = False,
+    include_screenshot: bool = True,
+) -> list[TextContent | ImageContent]:
+    """Make a FreeCAD model look finished: round sharp edges, colour parts by role, ghost references.
+
+    One call does the whole pass inside FreeCAD:
+    - Fillets convex straight edges between flat faces (circular edges, bores and protected objects are
+      never touched). If a fillet fails it retries with smaller radii, and a result is kept only when it is
+      a valid single solid whose volume changes by less than ``max_volume_change_pct``.
+    - Colours each part by its role, inferred from its name (jaw/finger -> accent, pad -> dark rubber,
+      rail/shaft -> metal, spring, motor/gear -> drive, mount/plate/block -> structure) with matching finish.
+    - Styles ``Ref_*`` reference objects (donut yellow, platform/floor ghosted, pole muted red).
+    - Smooths curved-surface display and frames an isometric view.
+
+    Only plain ``Part::Feature`` solids get new geometry; parametric features are reported as skipped.
+    The document is not saved. Check fits afterwards: protect mating parts and tight faces with ``protect``.
+
+    Args:
+        doc_name: Document to beautify.
+        fillet_radius: Target fillet radius in mm (0 to 10). 0 changes colours and view only.
+        palette: "workshop" (graphite + orange accent), "carbon" (dark + cyan), or "clean" (light + blue).
+        protect: Name patterns (e.g. "Pad_*") whose geometry is left alone. Default ["Ref_*"]. Reference
+            objects are always excluded from filleting.
+        min_edge_length: Ignore edges shorter than this many mm.
+        max_volume_change_pct: Reject a fillet that changes a part's volume by more than this (0-50).
+        style_references: Also recolour/ghost reference objects.
+        smooth_view: Reduce tessellation deviation so curves look round.
+        apply_camera: Switch to an isometric view and fit all.
+        dry_run: Report what would be filleted without changing anything.
+        include_screenshot: Return a screenshot after the pass.
+    """
+    return beautify_operation(
+        get_freecad_connection(),
+        state.only_text_feedback,
+        doc_name,
+        fillet_radius,
+        palette,
+        protect,
+        min_edge_length,
+        max_volume_change_pct,
+        style_references,
+        smooth_view,
+        apply_camera,
+        dry_run,
+        include_screenshot,
+    )
+
+
+@tool
 def get_rpc_status(ctx: Context) -> list[TextContent]:
     """Get RPC and FreeCAD GUI-dispatch health.
 
@@ -810,6 +925,11 @@ def _validate_host(value: str) -> str:
     raise argparse.ArgumentTypeError(
         f"Invalid host: '{value}'. Must be a valid IP address or hostname."
     )
+
+
+# Saved-assembly diagnostics in the existing MCP server.
+from .assembly_diagnostics import register as _register_diagnostics
+_register_diagnostics(mcp, state)
 
 
 def main():
