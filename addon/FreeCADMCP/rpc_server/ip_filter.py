@@ -9,6 +9,8 @@ import base64
 import hmac
 import ipaddress
 import re
+import socket
+import time
 from email.message import Message
 from socketserver import ThreadingMixIn
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
@@ -61,6 +63,31 @@ def browser_request_rejection(
 class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
     """Refuse requests a web page could have sent before they are dispatched."""
 
+    def _finish_rejection(self) -> None:
+        """Deliver the response before closing a socket with an unread body.
+
+        Windows can reset a connection with unread incoming data, losing the
+        response. Half-close the write side, then drain only a bounded amount
+        for a bounded time so an untrusted client cannot hold a thread open.
+        """
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + 0.2
+            remaining = 65536
+            while remaining > 0:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                self.connection.settimeout(timeout)
+                chunk = self.connection.recv(min(8192, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+
     def do_POST(self) -> None:
         rejection = browser_request_rejection(self.headers, self.server.loopback_only)
         if rejection is None:
@@ -77,6 +104,7 @@ class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
         self.send_header("Connection", "close")  # the unread body must not be parsed as a request
         self.end_headers()
         self.wfile.write(body)
+        self._finish_rejection()
 
 
 def authorization_ok(header_value: str, token: str) -> bool:
@@ -114,6 +142,7 @@ class TokenAuthRequestHandler(BrowserGuardRequestHandler):
             f"MCP RPC: Rejected unauthenticated request from {self.client_address[0]}\n"
         )
         self.send_error(401, "Unauthorized: valid auth token required")
+        self._finish_rejection()
         return False
 
 

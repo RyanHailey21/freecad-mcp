@@ -67,6 +67,21 @@ def test_browser_style_requests_never_reach_the_handler(
     assert interface.calls == []
 
 
+def test_rejection_does_not_wait_for_an_unfinished_request_body() -> None:
+    interface = Recorder()
+    with running_server(interface) as (_host, port):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.putrequest("POST", "/RPC2")
+            connection.putheader("Content-Type", "text/plain")
+            connection.putheader("Content-Length", "1000000")
+            connection.endheaders()
+            assert connection.getresponse().status == 415
+        finally:
+            connection.close()
+    assert interface.calls == []
+
+
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
 def test_xmlrpc_client_is_accepted(host: str) -> None:
     interface = Recorder()
