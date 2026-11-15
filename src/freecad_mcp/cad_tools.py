@@ -527,6 +527,49 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
         except Exception as exc:
             return _err(exc)
 
+    @tool
+    def gui_batch(
+        scripts: list[str],
+        entry: str,
+        items: list[Any],
+        instances: int = 3,
+        item_timeout: float = 600.0,
+        kwargs: bool = False,
+        name: str = "",
+        skip_unchanged: bool = True,
+        minimized: bool = True,
+        background: bool = True,
+    ) -> list[TextContent]:
+        """Run a script over many work items in N PRIVATE FreeCAD GUI processes (parallel TechDraw batches).
+
+        Each instance gets its own FreeCAD profile (FREECAD_USER_HOME), so the MCP addon is not loaded there:
+        no RPC server, the shared FreeCAD on port 9875 and the user's preferences are never touched.
+        Each instance exec()s `scripts` (in order, one namespace), then calls `entry(args)` - or
+        `entry(**args)` with kwargs=True - for every item of its slice, closing all documents between
+        items, and exits.  The item is also available to the script as BATCH_ITEM.
+        Args:
+            items: [{"id", "args", "fingerprint"?, "outputs"?: [paths]}] or bare JSON values.  With
+                skip_unchanged, an item whose fingerprint equals its last successful run and whose
+                outputs exist is skipped (e.g. fingerprint = hash of the part STEP + generator version).
+            instances: requested parallel GUIs (default 3), capped by free RAM (~1.5 GB each + 2 GB reserve).
+            item_timeout: per-item budget (s); an overrun is reported as "timeout", that instance is killed
+                and a new one continues its slice - the other items are unaffected.
+            name: cache key for skip_unchanged (default: scripts + entry).
+            background: run as a job (job_status shows per-item progress); recommended.
+        Returns per-item status (ok | error | timeout | crashed | skipped), seconds, the entry's JSON-able
+        return value or error + traceback + log tail, and the run directory with each instance's log.
+        """
+        from .gui_batch import run_batch
+
+        def work(job: Any) -> Any:
+            return run_batch(scripts, entry, items, instances, item_timeout, kwargs, name, skip_unchanged,
+                             None, minimized, job=job, cancel=getattr(job, "cancel", None))
+
+        try:
+            return _text(run_or_queue("gui_batch", work, background))
+        except Exception as exc:
+            return _err(exc)
+
     # ================================================================== frames / video
     @tool
     def render_frames(

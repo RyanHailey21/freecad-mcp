@@ -34,6 +34,7 @@ tools. This skill is the process and the judgement around them.
 | Title / tolerance block text | `techdraw_set_fields` (or `fields` in the spec) |
 | Re-export after edits, many pages | `techdraw_export` (`background=true` for batches, `png_dpi=110`) |
 | Layout check of any sheet (open doc or saved `.FCStd`) | `techdraw_lint` (read-only, GUI) |
+| Many sheets in parallel (private GUIs, shared FreeCAD untouched) | `gui_batch` (per-item time budget, skips unchanged sheets) |
 | Callouts vs the model (saved `.FCStd`) | `techdraw_verify` (read-only, headless: safe while the GUI is busy) |
 
 Export part shapes headless first (BREP or STEP path in `brep`) so the GUI does no modelling.

@@ -38,6 +38,7 @@ Caches live in `~/.cache/freecad-mcp` (override with `FREECAD_MCP_CACHE`);
 | `techdraw_export` | GUI | PDF/SVG (+ PNG review image) for many pages, one GUI call per page. |
 | `techdraw_part_drawing` | GUI | One-call reduced-dimension part drawing(s) from a BREP/STEP or object: ASME rules, overlap-free layout, exported. |
 | `techdraw_lint` | GUI | Read-only sheet check: label / leader / dimension-line conflicts, datums, metric text. |
+| `gui_batch` | private GUIs | Run a script over many items in N private FreeCAD GUI processes (own profile, no RPC); per-item time budget, skip unchanged. |
 | `techdraw_verify` | headless | Read-only model-vs-callout check of a saved sheet (counts, depths, FAR SIDE, csk angle, uncalled holes). |
 | `render_frames` | GUI | Assembly-simulation and/or camera-path frames in chunks; optional MP4. |
 | `encode_video` | server | PNG sequence → H.264 MP4 (ffmpeg / imageio-ffmpeg / Blender). |
@@ -179,3 +180,25 @@ Cold runs are dominated by evaluating the model itself; a busy machine
 (another FreeCAD session) made the same cold runs 3-4x slower. Booleans are
 deduplicated across poses, so the full sweep needs 2336 unique booleans for
 all pairs at all 14 poses.
+
+## Parallel GUI batches (`gui_batch`)
+
+TechDraw needs the GUI, and one GUI runs one job at a time. `gui_batch` starts
+N private FreeCAD GUI processes (default 3, capped by free RAM at ~1.5 GB each
+plus a 2 GB reserve). Each has its own `FREECAD_USER_HOME`, so the MCP addon is
+not loaded there and the shared instance on port 9875 is never touched. Each
+instance exec()s `scripts` into one namespace, calls `entry(args)` for every
+item of its round-robin slice (closing documents between items) and exits. An
+item over `item_timeout` is reported as `timeout`, its instance is killed and a
+fresh one continues the slice. Items with a `fingerprint` equal to their last
+successful run (and existing `outputs`) are skipped. Run directory with one log
+per instance: `<cache>/gui_batch/run_*`.
+
+Example (a project generator that draws one sheet per call; give each item its
+own output files - parallel instances must not share a log or index file):
+
+```json
+{"scripts": ["C:/proj/cad/drawings/make_drawings.py", "C:/proj/cad/drawings/one_sheet.py"],
+ "entry": "draw_one", "items": [{"id": "ARC-102", "args": {"index": 0}, "fingerprint": "<step sha1>",
+ "outputs": ["C:/proj/cad/drawings/out/ARC-102.pdf"]}], "instances": 3, "item_timeout": 600}
+```
