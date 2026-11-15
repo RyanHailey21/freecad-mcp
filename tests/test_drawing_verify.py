@@ -114,3 +114,17 @@ def test_external_journals_and_rounded_overrides():
 def test_both_ends_on_a_through_hole_is_not_each_side():
     d = _data([_hole(1.27, depth=30.0)], [("Call_g0", "⌀2.5 THRU; M3x0.5-6H ↧8 BOTH ENDS")], thickness=30.0)
     assert DV.compare(d)["findings"] == []
+
+
+def test_dbore_limit_dimensions():
+    """A D-bore with clearance limits: the model at line-to-line size is that feature, with a warning."""
+    c = DV.parse_callout("⌀6.1-6.2 D-BORE, FLAT 2.55-2.65 FROM ℄ THRU")
+    assert c["dia_lim"] == [6.1, 6.2] and c["flat_lim"] == [2.55, 2.65] and c["dflat"] and c["thru"]
+    sheet = [("Call_g1", "⌀6.1-6.2 D-BORE, FLAT 2.55-2.65 FROM ℄ THRU")]
+    r = DV.compare(_data([_hole(3.0, dflat=2.5)], sheet))
+    assert r["errors"] == 0 and r["warnings"] == 2, r["findings"]
+    r = DV.compare(_data([_hole(3.075, dflat=2.6)], sheet))
+    assert r["findings"] == [], r["findings"]
+    r = DV.compare(_data([_hole(3.075)], sheet))
+    assert [f["issue"] for f in r["findings"]] == ["D-BORE on the sheet but the model hole is round"]
+    assert DV.compare(_data([_hole(4.0, dflat=3.5)], sheet))["errors"] == 2   # 8 mm is not this feature

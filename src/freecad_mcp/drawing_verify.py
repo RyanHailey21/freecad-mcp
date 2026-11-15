@@ -79,11 +79,13 @@ def parse_callout(text: str) -> dict[str, Any] | None:
     if CBORE in main:
         main, cb = main.split(CBORE, 1)
     mt = re.match(r"^(M\d+(?:\.\d+)?)x" + _NUM, main) or re.match(r"^(Tr\d+)x", main)
-    md = re.match("^" + DIA + _NUM, main)
+    md = re.match("^" + DIA + _NUM + r"(?:\s*[-–]\s*" + _NUM + r")?", main)
     if mt:
         out["thread"] = mt.group(1)
     elif md:
         out["dia"] = float(md.group(1))
+        if md.group(2):                                # limit dimension: low-high
+            out["dia_lim"] = [float(md.group(1)), float(md.group(2))]
     elif cb is not None and not main.strip():         # split counterbore callout (datum group): own line
         c = re.match("^" + DIA + _NUM, cb.strip())
         d = re.search(DEPTH + _NUM, cb)
@@ -100,6 +102,9 @@ def parse_callout(text: str) -> dict[str, Any] | None:
     out["each_side"] = "EACH SIDE" in main or "BOTH ENDS" in main
     out["far"] = main.rstrip().endswith("FAR SIDE")
     out["dflat"] = "D-BORE" in main
+    fm = re.search(r"FLAT\s+" + _NUM + r"(?:\s*[-–]\s*" + _NUM + r")?", main)
+    if fm:
+        out["flat_lim"] = [float(fm.group(1)), float(fm.group(2) or fm.group(1))]
     if cb is not None:
         c = re.match("^" + DIA + _NUM, cb.strip())
         d = re.search(DEPTH + _NUM, cb)
@@ -133,7 +138,17 @@ def _dia_matches(c: dict[str, Any], h: dict[str, Any]) -> bool:
     if "thread" in c:
         lo_hi = TAP_DRILL.get(c["thread"])
         return bool(lo_hi and lo_hi[0] - 0.05 <= d <= lo_hi[1] + 0.05)
+    if c.get("dia_lim"):                               # limits: inside them, or modelled just outside
+        lo, hi = c["dia_lim"]                           # (line-to-line; compare() warns about it)
+        return lo - LIMIT_SLACK <= d <= hi + LIMIT_SLACK
     return abs(c["dia"] - d) <= max(0.05, 0.011 + 0.005 * d)    # override texts may round (2.54 -> 2.5)
+
+
+LIMIT_SLACK = 0.3          # how far outside drawing limits a model size may sit and still be that feature
+
+
+def _outside(v: float, lim: list[float], tol: float = 0.005) -> bool:
+    return not (lim[0] - tol <= v <= lim[1] + tol)
 
 
 def compare(data: dict[str, Any], side_holes: bool = True) -> dict[str, Any]:
@@ -179,6 +194,14 @@ def compare(data: dict[str, Any], side_holes: bool = True) -> dict[str, Any]:
             return s
         i, h = max(cand, key=score)
         used.add(i)
+        if c.get("dia_lim") and _outside(2 * h["r"], c["dia_lim"]):
+            add("warning", b, "model %s%g is outside the drawing limits %g-%g (modelled line-to-line?)" % (
+                DIA, round(2 * h["r"], 3), *c["dia_lim"]))
+        if c.get("flat_lim") and h.get("dflat") is not None and _outside(h["dflat"], c["flat_lim"]):
+            add("warning", b, "model D-flat %g from the axis is outside the drawing limits %g-%g" % (
+                round(h["dflat"], 3), *c["flat_lim"]))
+        if c.get("dflat") and h.get("dflat") is None:
+            add("error", b, "D-BORE on the sheet but the model hole is round")
         if h["n"] != c["count"]:
             add("error", b, "count %dX on the sheet, %d in the model" % (c["count"], h["n"]))
         if bool(h["thru"]) != c["thru"] and not c["each_side"]:
