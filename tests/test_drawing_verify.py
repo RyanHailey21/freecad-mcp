@@ -109,3 +109,8 @@ def test_external_journals_and_rounded_overrides():
                       ("Call_g1", "Tr8x8(P2) LH-7H THRU")])
     r = DV.compare(d)
     assert r["clean"] and r["external_callouts_skipped"] == 1 and r["callouts_checked"] == 2, r
+
+
+def test_both_ends_on_a_through_hole_is_not_each_side():
+    d = _data([_hole(1.27, depth=30.0)], [("Call_g0", "⌀2.5 THRU; M3x0.5-6H ↧8 BOTH ENDS")], thickness=30.0)
+    assert DV.compare(d)["findings"] == []

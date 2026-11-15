@@ -192,7 +192,7 @@ def compare(data: dict[str, Any], side_holes: bool = True) -> dict[str, Any]:
                     add("error", b, "thread depth %g deeper than the drilled hole %g" % (c["depth"], round(h["depth"], 2)))
             elif abs(c["depth"] - h["depth"]) > 0.06:
                 add("error", b, "depth %g on the sheet, %g in the model" % (c["depth"], round(h["depth"], 2)))
-        if c["each_side"] != bool(h.get("each_side")) and "thread" not in c:
+        if c["each_side"] != bool(h.get("each_side")) and "thread" not in c and not c["thru"]:
             add("warning", b, "EACH SIDE mismatch (model each_side=%s)" % bool(h.get("each_side")))
         if i < 1000 and not c["thru"] and c["far"] != bool(h.get("far")):
             add("error", b, "FAR SIDE %s on the sheet but the hole opens on the %s face" % (
