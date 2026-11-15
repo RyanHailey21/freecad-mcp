@@ -481,6 +481,29 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
             return _err(exc)
 
     @tool
+    def techdraw_verify(path: str, model: str = "", orient: bool = True, timeout: float = 180) -> list[TextContent]:
+        """Headless model-vs-drawing check of a saved part drawing (.FCStd); no GUI, nothing modified.
+
+        Re-derives the holes from the MODEL (fcmcp_features: near/far side, counterbores, countersink angle,
+        EACH SIDE, side holes) and checks every hole callout on the sheet: counts, THRU vs blind, depth vs the
+        model and vs the part thickness, thread depth vs the drilled hole, FAR SIDE for holes, counterbores
+        and countersinks, countersink angle, uncalled counterbores/countersinks, model hole groups with no
+        callout, and datums referenced but not defined.
+        model: STEP/BREP to check against (default: the 'Part' object techdraw_part_drawing stored in the
+        drawing, already oriented); orient: re-axe that model like part_drawing does.
+        Use it with techdraw_lint and a visual check; it does not replace an independent review.
+        """
+        from .drawing_verify import EXTRACT_LIB, compare
+
+        try:
+            data = run_headless_lib(state.freecadcmd, EXTRACT_LIB, "extract",
+                                    {"path": path, "model": model, "orient": orient}, timeout,
+                                    modules={"fcmcp_features": (_FCWORKERS / "fcmcp_features.py").read_text(encoding="utf-8")})
+            return _text(dict(compare(data), doc=data.get("doc"), path=path))
+        except Exception as exc:
+            return _err(exc)
+
+    @tool
     def techdraw_lint(doc_name: str = "", path: str = "", page_name: str = "", frame: list[float] | None = None,
                       keepout: list[list[float]] | None = None) -> list[TextContent]:
         """Read-only drawing check on an open page (doc_name) or a saved .FCStd (path; opened, then closed).

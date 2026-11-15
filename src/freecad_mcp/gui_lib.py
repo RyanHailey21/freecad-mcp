@@ -72,11 +72,11 @@ def run_gui(freecad: Any, library: str, fn: str, params: dict[str, Any], timeout
 
 
 def run_headless_lib(command: list[str] | None, library: str, fn: str, params: dict[str, Any],
-                     timeout: float = 600) -> Any:
+                     timeout: float = 600, modules: dict[str, str] | None = None) -> Any:
     """Same as run_gui but in a fresh ``freecadcmd`` process."""
     from .headless import run_headless
 
-    res = run_headless(build_script(library, fn, params), timeout, command)
+    res = run_headless(build_script(library, fn, params, modules), timeout, command)
     reply = parse_reply(res.get("output", ""))
     if not reply.get("ok"):
         err = reply.get("error") or res.get("error") or "headless run failed"
