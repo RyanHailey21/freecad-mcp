@@ -1,6 +1,7 @@
 """Interference / hole checks: pure-python logic always, headless FreeCAD integration when available."""
 
 import json
+import os
 import math
 import textwrap
 import threading
@@ -162,6 +163,10 @@ def cache_env(tmp_path, monkeypatch):
 def test_interference_provider_poses_cache_and_clearance(cache_env):
     prov = cache_env / "prov.py"
     prov.write_text(PROVIDER)
+    # a file written milliseconds before the run can carry an mtime at/after prepare()'s start on Windows
+    # (file-system vs time.time() clocks), which the "edited during evaluation" guard rightly rejects
+    past = time.time() - 5
+    os.utime(prov, (past, past))
     src = {"python": str(prov), "poses_function": "poses"}
     r = ic.interference_check(src, workers=2, command=FC)
     assert r["status"] == "clash", r
