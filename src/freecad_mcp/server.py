@@ -925,6 +925,10 @@ def _validate_host(value: str) -> str:
 from .assembly_diagnostics import register as _register_diagnostics
 _register_diagnostics(mcp, state)
 
+# Checks, drawings, renders, assembly helpers and the background job queue.
+from .cad_tools import register as _register_cad_tools
+_register_cad_tools(tool, state, get_freecad_connection)
+
 
 def main():
     """Run the MCP server"""

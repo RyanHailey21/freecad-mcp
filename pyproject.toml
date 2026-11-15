@@ -13,11 +13,18 @@ dependencies = [
     "validators>=0.34.0",
 ]
 
+[project.optional-dependencies]
+# MP4 encoding for render_frames / encode_video (bundled ffmpeg binary)
+video = ["imageio-ffmpeg>=0.5"]
+# PDF -> PNG review images for the TechDraw export tools
+drawings = ["pymupdf>=1.24"]
+
 [project.scripts]
 freecad-mcp = "freecad_mcp.server:main"
 
 [dependency-groups]
 dev = [
+    "imageio-ffmpeg>=0.5",
     "pytest>=8,<10",
 ]
 
