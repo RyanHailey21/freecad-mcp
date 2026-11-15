@@ -61,6 +61,27 @@ def browser_request_rejection(
 class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
     """Refuse requests a web page could have sent before they are dispatched."""
 
+    MAX_DRAIN = 1 << 20
+
+    def _drain_body(self) -> None:
+        """Read (and discard) the rejected request's body, up to MAX_DRAIN bytes.
+
+        Closing a socket with unread received data makes Windows send a reset instead of a
+        normal close, so the client intermittently saw "connection aborted" (WinError 10053)
+        instead of the 403/415 answer."""
+        try:
+            remaining = min(int(self.headers.get("Content-Length") or 0), self.MAX_DRAIN)
+        except ValueError:
+            return
+        try:
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+
     def do_POST(self) -> None:
         rejection = browser_request_rejection(self.headers, self.server.loopback_only)
         if rejection is None:
@@ -70,6 +91,7 @@ class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
         FreeCAD.Console.PrintWarning(
             f"MCP RPC: Rejected request from {self.client_address[0]}: {reason}\n"
         )
+        self._drain_body()
         body = reason.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
