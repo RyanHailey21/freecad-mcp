@@ -125,19 +125,29 @@ def execute_code_operation(
 def execute_code_async_operation(
     freecad: FreeCADConnection,
     code: str,
+    allow_gui: bool = False,
 ) -> ToolResponse:
+    from ..async_guard import check, refusal_text
+
+    guard = check(code)
+    if guard["refuse"] and not allow_gui:
+        return text_response(refusal_text(guard))
+    prefix = ""
+    if guard["warn"] or (guard["refuse"] and allow_gui):
+        prefix = ("WARNING (async thread, outside commit()):\n  "
+                  + "\n  ".join(guard["refuse"] + guard["warn"]) + "\n")
     try:
         res = freecad.execute_code_async(code)
         if res["success"]:
             job_id = res.get("job_id", "")
             if not job_id:
                 return text_response(
-                    "Code execution started in background.\n"
+                    prefix + "Code execution started in background.\n"
                     "This addon does not report job IDs; use get_object to poll "
                     "a document status object and inspect FreeCAD's Report View for errors."
                 )
             return text_response(
-                f"Code execution started in background (job_id: {job_id}).\n"
+                prefix + f"Code execution started in background (job_id: {job_id}).\n"
                 f"Poll get_async_status(job_id=\"{job_id}\") for state, error "
                 "and traceback. "
                 "FreeCAD's Report View shows printed output when done."

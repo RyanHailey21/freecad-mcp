@@ -461,7 +461,7 @@ def delete_object(
 
 
 @tool
-def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
+def execute_code_async(ctx: Context, code: str, allow_gui: bool = False) -> list[TextContent]:
     """Execute Python code in FreeCAD without waiting for completion.
 
     Use this ONLY for long-running background computations that do NOT touch the
@@ -515,14 +515,19 @@ def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
     single boolean against the heavy shape, and avoid doc.recompute() unless the
     dependency graph really needs it.
 
+    Guard: code that uses TechDraw, TechDrawGui or FreeCADGui outside a function passed to
+    commit() is refused (TechDraw work from this thread hung FreeCAD); document mutation outside
+    commit() (addObject, recompute, save, ...) starts but is reported as a warning.
+
     Args:
         code: Background-safe Python code to execute. Use commit(fn) for all
             document and view writes.
+        allow_gui: Start even when the guard would refuse (you have checked the code yourself).
 
     Returns:
         A message with the job_id of the started background execution.
     """
-    return execute_code_async_operation(get_freecad_connection(), code)
+    return execute_code_async_operation(get_freecad_connection(), code, allow_gui)
 
 
 @tool
