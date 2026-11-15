@@ -4,9 +4,12 @@ One FreeCAD GUI handles about one TechDraw sheet per 30-90 s and runs one job at
 starts N *private* FreeCAD GUI processes, each runs a user script on its own slice of work items and
 exits; results come back as one job (job_status / progress).
 
-Isolation: every child gets its own ``FREECAD_USER_HOME`` (a fresh profile under the cache dir), so the
-MCP addon is not loaded there - no RPC server, nothing on port 9875 - and the user's preferences and
-the shared GUI instance are never touched.
+Isolation: every child gets its own ``FREECAD_USER_HOME`` (a private profile under the cache dir), so the
+MCP addon (it lives in the user's Mod folder) is not loaded there - no RPC server, nothing on port 9875 -
+and the shared GUI instance is never touched.  The profile is seeded with a COPY of the user's user.cfg
+(``user_cfg="auto"``): TechDraw renders with the user's preferences (with factory defaults a leaderless
+feature control frame showed its zero-length leader as a line through the symbol cells).  The user's
+own user.cfg is only read, never written.
 
 Work items: ``{"id": str, "args": <json>, "fingerprint": str?, "outputs": [paths]?}`` (a bare JSON value
 is wrapped as ``{"id": str(i), "args": value}``).  The child exec()s ``scripts`` in order into one
@@ -104,6 +107,24 @@ import hashlib
 from PySide import QtCore
 QtCore.QTimer.singleShot(300, _run)
 '''
+
+
+def user_cfg_path() -> Path | None:
+    """The user's FreeCAD preferences (user.cfg): newest versioned profile first (v1-1/...), then the flat one."""
+    roots = []
+    if sys.platform == "win32":
+        roots.append(Path(os.environ.get("APPDATA", "")) / "FreeCAD")
+    else:
+        roots += [Path.home() / ".config" / "FreeCAD", Path.home() / ".local" / "share" / "FreeCAD",
+                  Path.home() / "Library" / "Application Support" / "FreeCAD"]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        versioned = sorted((d for d in root.glob("v*-*") if (d / "user.cfg").is_file()), reverse=True)
+        for c in [d / "user.cfg" for d in versioned] + [root / "user.cfg"]:
+            if c.is_file():
+                return c
+    return None
 
 
 def free_ram_bytes() -> int | None:
@@ -216,6 +237,10 @@ class _Worker:
     def launch(self, exe: str) -> None:
         self.launches += 1
         self.home.mkdir(parents=True, exist_ok=True)
+        ucfg = self.spec.get("user_cfg")
+        if ucfg and not (self.home / "user.cfg").exists():
+            import shutil
+            shutil.copyfile(ucfg, self.home / "user.cfg")       # read-only use of the user's preferences
         params = dict(self.spec, items=self.todo, worker=self.name, status_dir=str(self.run_dir),
                       log=str(self.run_dir / ("log_w%d.txt" % self.idx)))
         pf = self.run_dir / ("params_%s.json" % self.name)
@@ -242,7 +267,7 @@ class _Worker:
 def run_batch(scripts: list[str], entry: str, items: list[Any], instances: int = 3, item_timeout: float = 600.0,
               kwargs: bool = False, name: str = "", skip_unchanged: bool = True, executable: str | None = None,
               minimized: bool = True, job: Any = None, cancel: Any = None, per_instance_gb: float = PER_INSTANCE_GB,
-              poll: float = 0.5) -> dict[str, Any]:
+              poll: float = 0.5, user_cfg: str | None = "auto") -> dict[str, Any]:
     exe = executable or find_freecad_executable()
     if not exe:
         raise RuntimeError("FreeCAD executable not found (set FREECAD_EXE)")
@@ -265,7 +290,9 @@ def run_batch(scripts: list[str], entry: str, items: list[Any], instances: int =
     run_dir = cache_root() / "gui_batch" / ("run_" + time.strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6])
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "child.py").write_text(CHILD, encoding="utf-8")
-    spec = {"scripts": scripts, "entry": entry, "kwargs": bool(kwargs), "minimized": minimized}
+    cfg = user_cfg_path() if user_cfg == "auto" else (Path(user_cfg) if user_cfg else None)
+    spec = {"scripts": scripts, "entry": entry, "kwargs": bool(kwargs), "minimized": minimized,
+            "user_cfg": str(cfg) if cfg and cfg.is_file() else None}
     workers = [_Worker(k, sl, run_dir, spec) for k, sl in enumerate(split_slices(todo, n))] if todo else []
     t0 = time.time()
     total = len(items_n)
@@ -377,5 +404,5 @@ def run_batch(scripts: list[str], entry: str, items: list[Any], instances: int =
     counts: dict[str, int] = {}
     for r in ordered:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
-    return {"instances": len(workers), "requested_instances": n_req, "elapsed_s": round(time.time() - t0, 1),
+    return {"instances": len(workers), "requested_instances": n_req, "user_cfg": spec["user_cfg"], "elapsed_s": round(time.time() - t0, 1),
             "counts": counts, "run_dir": str(run_dir), "items": ordered}

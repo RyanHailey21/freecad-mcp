@@ -72,3 +72,17 @@ def test_two_private_gui_instances(tmp_path, monkeypatch):
     assert by["slow"]["status"] == "timeout"
     r2 = GB.run_batch([str(script)], "make", items[:2], instances=2, item_timeout=25, name="t")
     assert r2["counts"] == {"skipped": 2} and r2["instances"] == 0
+
+
+def test_user_cfg_lookup_prefers_the_newest_versioned_profile(tmp_path, monkeypatch):
+    root = tmp_path / "FreeCAD"
+    for d in ("v1-0", "v1-1"):
+        (root / d).mkdir(parents=True)
+        (root / d / "user.cfg").write_text(d)
+    (root / "user.cfg").write_text("flat")
+    monkeypatch.setattr(GB.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    assert GB.user_cfg_path().read_text() == "v1-1"
+    for d in ("v1-0", "v1-1"):
+        (root / d / "user.cfg").unlink()
+    assert GB.user_cfg_path().read_text() == "flat"

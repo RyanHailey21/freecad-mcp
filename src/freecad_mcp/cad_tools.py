@@ -542,8 +542,9 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
     ) -> list[TextContent]:
         """Run a script over many work items in N PRIVATE FreeCAD GUI processes (parallel TechDraw batches).
 
-        Each instance gets its own FreeCAD profile (FREECAD_USER_HOME), so the MCP addon is not loaded there:
-        no RPC server, the shared FreeCAD on port 9875 and the user's preferences are never touched.
+        Each instance gets its own FreeCAD profile (FREECAD_USER_HOME), seeded with a copy of the user's
+        user.cfg so sheets render with the user's TechDraw preferences; the MCP addon (user Mod folder) is
+        not loaded there: no RPC server, the shared FreeCAD on port 9875 is never touched.
         Each instance exec()s `scripts` (in order, one namespace), then calls `entry(args)` - or
         `entry(**args)` with kwargs=True - for every item of its slice, closing all documents between
         items, and exits.  The item is also available to the script as BATCH_ITEM.
