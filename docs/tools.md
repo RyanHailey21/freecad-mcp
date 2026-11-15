@@ -24,6 +24,11 @@
 | `get_parts_list` | List parts in the [FreeCAD parts library](https://github.com/FreeCAD/FreeCAD-library). |
 | `run_fem_analysis` | Run CalculiX on an existing analysis and return summary results. |
 
+CAD workflow tools (headless parallel checks, TechDraw drawings, renders,
+assembly checks, background jobs) are described in [CAD workflow tools](cad_tools.md):
+`interference_check`, `hole_edge_check`, `clear_check_cache`, `job_status`,
+`job_cancel`, `techdraw_*`, `render_frames`, `encode_video` and `assembly_*`.
+
 See [code execution](execution.md) for execution modes, shared script state,
 background job tracking, and timeout handling.
 

@@ -102,7 +102,7 @@ def test_techdraw_tokens_and_scales():
                             "datums": ["A", "B"]}) == "⌖|⌀0.1Ⓜ|A|B"
     assert ns["_fcf_text"]({"cells": ["flatness", "0.01"]}) == "⏥|0.01"
     assert ns["pick_scale"](100, 50, 205, 150) == 2
-    assert ns["scale_txt"](0.5) == "1:2" and ns["scale_txt"](3) == "3:1"
+    assert ns["scale_txt"](0.5) == "1:2" and ns["scale_txt"](3) == "3:1" and ns["scale_txt"](0.75) == "3:4"
     assert ns["hole_text"]({"r": 1.25, "thru": False, "depth": 6.0}, {"1.25": "M3x0.5-6H"}) == "M3x0.5-6H ↧5.5"
     assert ns["hole_text"]({"r": 1.65, "thru": True, "depth": 3, "cbore": (6.5, 3.0)}) == \
         "⌀3.3 THRU  ⌴⌀6.5 ↧3.0"

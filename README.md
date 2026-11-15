@@ -70,6 +70,7 @@ default.
 | [Installation](docs/installation.md) | Addon directories, setup screenshots, running from source |
 | [Configuration](docs/configuration.md) | Auto-start, text feedback, remote connections |
 | [Tools](docs/tools.md) | Available tools, screenshots, FEM analysis |
+| [CAD workflow tools](docs/cad_tools.md) | Cached parallel clash / hole checks, TechDraw drawings with GD&T, simulation renders, assembly checks, background jobs |
 | [Code execution](docs/execution.md) | GUI execution, background jobs, headless scripts, timeout troubleshooting |
 | [Demos and examples](docs/examples.md) | Design demos, FEM example, ADK and LangChain integrations |
 

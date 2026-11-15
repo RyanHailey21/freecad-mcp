@@ -111,10 +111,15 @@ def simulation_check(p):
     if p.get("simulation"):
         sim = doc.getObject(p["simulation"]) or (doc.getObjectsByLabel(p["simulation"]) or [None])[0]
     if sim is None:
-        sims = [o for o in doc.Objects if getattr(getattr(o, "Proxy", None), "__class__", type).__name__ == "Simulation"]
+        sims = [o for g in doc.Objects if g.TypeId == "Assembly::SimulationGroup" for o in g.Group
+                if o.TypeId == "App::FeaturePython"]
         sim = sims[0] if sims else None
     if sim is None:
         raise ValueError("no simulation found")
+    if getattr(sim, "Proxy", None) is None:
+        raise RuntimeError("simulation %s has no Python proxy: Assembly simulations need the FreeCAD GUI "
+                           "(CommandCreateSimulation imports Qt). Open the document in the GUI and call "
+                           "without 'path'." % sim.Name)
     asm = _assembly(doc, p.get("assembly")) if p.get("assembly") else None
     if asm is None:
         for o in doc.Objects:

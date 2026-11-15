@@ -81,16 +81,36 @@ def render_chunk(p):
     w, h = int(p.get("width", 1280)), int(p.get("height", 720))
     bg = p.get("background", "Current")
     written = []
+    hidden = []
+    if p.get("hide_joints", True):          # joint / grounded-joint glyphs clutter renders
+        for o in doc.Objects:
+            if o.TypeId == "Assembly::JointGroup" and o.ViewObject and o.ViewObject.Visibility:
+                o.ViewObject.Visibility = False
+                hidden.append(o)
+    try:
+        _frames(p, doc, view, asm, n_sim, frames, index0, total, pat, w, h, bg, written)
+    finally:
+        for o in hidden:
+            o.ViewObject.Visibility = True
+    return {"written": len(written), "last": written[-1] if written else None, "sim_frames": n_sim}
+
+
+def _frames(p, doc, view, asm, n_sim, frames, index0, total, pat, w, h, bg, written):
     for k, f in enumerate(frames):
         if asm is not None:
             asm.updateForFrame(min(int(f), n_sim - 1))
-        if p.get("camera"):
-            set_camera(view, *camera_at(p["camera"], index0 + k, total))
+        cam = p.get("camera")
+        if cam:
+            set_camera(view, *camera_at(cam, index0 + k, total))
+            node = view.getCameraNode()
+            if cam.get("height") and hasattr(node, "height"):      # orthographic view volume (mm)
+                node.height.setValue(float(cam["height"]))
+            elif cam.get("fit", True):                             # keep direction, frame everything
+                view.fitAll()
         Gui.updateGui()
         path = os.path.join(p["out_dir"], pat % (index0 + k))
         view.saveImage(path, w, h, bg)
         written.append(path)
-    return {"written": len(written), "last": written[-1] if written else None, "sim_frames": n_sim}
 
 
 def sim_frame_count(p):

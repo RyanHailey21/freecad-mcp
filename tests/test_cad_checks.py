@@ -74,6 +74,17 @@ def test_select_pairs_filters_and_dedupes():
     assert stats["pairs"] == 12
 
 
+def test_select_pairs_canonical_swap_keeps_every_pair():
+    # fingerprints in descending order force a swap on every pair; each pair must stay distinct
+    items = [[f"P{i}", f"G{i}", f"f{9 - i}", rot_z(0, (i, 0, 0)), [0, 0, 0, 10, 10, 10]] for i in range(5)]
+    pairs, _ = ic.select_pairs({"shapes": {}, "poses": [{"label": "p", "items": items}]})
+    got = {frozenset((a, b)) for _pi, a, b, _k, _t in pairs}
+    assert got == {frozenset((f"P{i}", f"P{j}")) for i in range(5) for j in range(i + 1, 5)}
+    for _pi, a, b, key, task in pairs:
+        fa, fb = key.split("|")[1:3]
+        assert {fa, fb} == {"f%d" % (9 - int(a[1])), "f%d" % (9 - int(b[1]))}
+
+
 def test_split_balanced_spreads_cost():
     bins = split_balanced(list(range(10)), lambda x: x, 3)
     loads = sorted(sum(b) for b in bins)

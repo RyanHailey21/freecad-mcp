@@ -551,7 +551,9 @@ SCALES = [10, 5, 4, 3, 2, 1.5, 1, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2, 0.1, 0.05]
 
 
 def scale_txt(sc):
-    return "%g:1" % sc if sc >= 1 else "1:%g" % (1 / sc)
+    from fractions import Fraction
+    f = Fraction(sc).limit_denominator(100)
+    return "%d:%d" % (f.numerator, f.denominator)
 
 
 def pick_scale(w, h, max_w, max_h, scales=SCALES):
@@ -738,8 +740,15 @@ def part_drawing(p):
         order = sorted(groups.items(), key=lambda kv: -kv[1][0]["r"])
         circles = [e.Curve for _i, e in _edges(front) if e.Curve.__class__.__name__ == "Circle"]
         x_text = (xh - xl) / 2 + 22 / sc
+        if side is not None:                  # keep the callout column clear of the Right view
+            try:
+                dx = float(side.X) - float(front.X)
+            except Exception:
+                dx = 0.0
+            # FCF boxes are centred on x_text (~55 mm wide): clear the side view by ~35 page mm
+            x_text = max(x_text, dx / sc + Lz / 2 + 35 / sc, (xh - xl) / 2 + Lz + 50 / sc)
         y_text = (yh - yl) / 2 + 4 / sc
-        step = 17.0 / sc
+        step = 22.0 / sc
         letters = ["B", "C"]
         for gi, (txt, hs) in enumerate(order[:int(p.get("max_callouts", 7))]):
             r = hs[0]["r"]
@@ -755,10 +764,10 @@ def part_drawing(p):
                 drf = ["A"] if nholes == 0 else (["A", "B"] if nholes == 1 else ["A", "B", "C"])
                 sym = "perpendicularity" if nholes == 0 else "position"
                 items.append(dict(kind="fcf", view=front.Name, cells=[sym, "{dia}" + pos_tol] + drf,
-                                  at=[x_text, y - 6.5 / sc], name="FCF_%d" % nholes))
+                                  at=[x_text, y - 8.5 / sc], name="FCF_%d" % nholes))
                 if nholes < 2:
                     items.append(dict(kind="datum", view=front.Name, letter=letters[nholes],
-                                      origin=[x_text - 16 / sc, y - 9.8 / sc], at=[x_text - 24 / sc, y - 13.5 / sc]))
+                                      origin=[x_text + 26 / sc, y - 8.5 / sc], at=[x_text + 36 / sc, y - 8.5 / sc]))
             nholes += 1
     if p.get("profile_tolerance") and vxl:
         drf = ["A", "B", "C"][:1 + min(nholes, 2)] if p.get("datums", True) else []

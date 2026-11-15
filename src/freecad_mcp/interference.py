@@ -103,11 +103,14 @@ def select_pairs(
                 if not bbox_hit(ba, bb, clearance):
                     continue
                 stats["bbox_pass"] += 1
-                # canonical order so (A,B) and (B,A) share a cache entry
+                # canonical order so (A,B) and (B,A) share a cache entry (fresh names: the outer
+                # loop's A must not be overwritten)
                 if (fb, nb) < (fa, na):
-                    na, nb, fa, fb, ma, mb = nb, na, fb, fa, mb, ma
-                key = f"{CACHE_VERSION}|{fa}|{fb}|{relkey(ma, mb)}|c{clearance:g}"
-                out.append((pi, na, nb, key, {"fa": fa, "ma": ma, "fb": fb, "mb": mb}))
+                    n1, n2, f1, f2, m1, m2 = nb, na, fb, fa, mb, ma
+                else:
+                    n1, n2, f1, f2, m1, m2 = na, nb, fa, fb, ma, mb
+                key = f"{CACHE_VERSION}|{f1}|{f2}|{relkey(m1, m2)}|c{clearance:g}"
+                out.append((pi, n1, n2, key, {"fa": f1, "ma": m1, "fb": f2, "mb": m2}))
     return out, stats
 
 
