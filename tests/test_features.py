@@ -37,6 +37,8 @@ FIXTURES = textwrap.dedent(r'''
     out["each_side"] = table(plate().cut(cyl(1.25, 3, 10, 10, 0)).cut(cyl(1.25, 3, 10, 10, 7)))
     out["side_blind"] = table(plate().cut(cyl(1.5, 8, 0, 20, 5, V(1, 0, 0))))        # opens on the x = 0 face
     out["side_pair"] = table(plate().cut(cyl(1.5, 8, 0, 20, 5, V(1, 0, 0))).cut(cyl(1.5, 8, 32, 20, 5, V(1, 0, 0))))
+    stepped = Part.makeBox(40, 30, 30).cut(Part.makeBox(10, 10, 10, V(5, 17, 0)))   # pocket open to the bottom
+    out["coaxial_split"] = table(stepped.cut(cyl(1.25, 6, 10, 22, 10)).cut(cyl(1.25, 6, 10, 22, 24)))
     disc = Part.makeCylinder(15, 6)
     dcut = Part.makeBox(10, 20, 6, V(2.5, -10, 0))                             # flat 2.5 from the axis
     out["dbore"] = table(disc.cut(cyl(3, 6, 0, 0).cut(dcut)))
@@ -134,3 +136,13 @@ def test_orientation_and_symmetry(res):
     assert res["orient"] == [60.0]                              # the (Y, 60 long) hole axis becomes Z
     assert res["sym"] == [True, True]                           # mirror about a mid-plane still holds with one hole
     assert res["describe"] is True
+
+
+def test_coaxial_blind_holes_from_different_faces_stay_separate(res):
+    """ARC-106: one blind hole opens into a pocket below, the other from the top, material between."""
+    hs = sorted(res["coaxial_split"]["holes"], key=lambda h: h["z0"])
+    assert len(hs) == 2, hs
+    low, top = hs
+    assert not low["thru"] and not top["thru"]
+    assert low["far"] and not top["far"]                      # opens downward into the pocket / from the top
+    assert low["depth"] == pytest.approx(6) and top["depth"] == pytest.approx(6)

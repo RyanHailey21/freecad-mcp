@@ -190,6 +190,21 @@ def hole_table(shape, r_min=R_MIN, r_max=R_MAX, dflat_min=DFLAT_MIN):
                 same[0]["z0"] <= zmin + 0.01 and same[1]["z1"] >= zmax - 0.01 and same[0]["z1"] < same[1]["z0"] - 0.1:
             base["each_side"] = True                    # two blind holes, one from each face, material between
             base["depth"] = max(same[0]["depth"], same[1]["depth"])
+        elif len(same) >= 2 and not any(h_["thru"] for h_ in same) and \
+                any(same[i_]["z1"] < same[i_ + 1]["z0"] - 0.1 for i_ in range(len(same) - 1)):
+            # coaxial blind holes opening on DIFFERENT faces (e.g. into a pocket and from the top), with material
+            # between: separate holes, each with its own side - never one "THRU" column (arm sync, ARC-106)
+            same.sort(key=lambda h_: h_["z0"])
+            base = same[-1]
+            base.setdefault("cbore", None)
+            base.setdefault("cb_far", False)
+            base["each_side"] = False
+            hs = [base] + [h_ for h_ in hs if abs(h_["r"] - base["r"]) >= 0.02]
+            for extra in same[:-1]:
+                extra.update(cbore=None, cb_far=False, csk=None, each_side=False)
+                extra["far"] = not _open(extra["x"], extra["y"], extra["z1"] + 0.3) and \
+                    _open(extra["x"], extra["y"], extra["z0"] - 0.3)
+                final.append(extra)
         lo = min(h_["z0"] for h_ in hs)
         hi = max(h_["z1"] for h_ in hs)
         if not base["each_side"] and _open(base["x"], base["y"], lo - 0.3) and _open(base["x"], base["y"], hi + 0.3):
