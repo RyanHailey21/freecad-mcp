@@ -38,6 +38,7 @@ Caches live in `~/.cache/freecad-mcp` (override with `FREECAD_MCP_CACHE`);
 | `techdraw_export` | GUI | PDF/SVG (+ PNG review image) for many pages, one GUI call per page. |
 | `techdraw_part_drawing` | GUI | One-call reduced-dimension part drawing(s) from a BREP/STEP or object: ASME rules, overlap-free layout, exported. |
 | `techdraw_lint` | GUI | Read-only sheet check: label / leader / dimension-line conflicts, datums, metric text. |
+| `techdraw_verify` | headless | Read-only model-vs-callout check of a saved sheet (counts, depths, FAR SIDE, csk angle, uncalled holes). |
 | `render_frames` | GUI | Assembly-simulation and/or camera-path frames in chunks; optional MP4. |
 | `encode_video` | server | PNG sequence → H.264 MP4 (ffmpeg / imageio-ffmpeg / Blender). |
 | `assembly_attach_view_providers` | GUI | Re-attach joint/simulation view providers in headless-built assemblies. |
@@ -116,10 +117,14 @@ References for dimensions can be names (`"Edge3"`) or geometric queries:
  "out_dir": "C:/proj/drawings/out", "png_dpi": 110, "background": true}
 ```
 
-`process` (`machined` / `plate` / `printed`) picks default position and
-profile tolerances and whether MMC, ISO 286 fits and hidden lines apply;
-`projected_heights` (`{"M3": 6}` or `{"<part>|M3": 6}`) gives the projected
-tolerance zone for tapped holes (default 6 mm, with a warning).
+`process` (built-ins `machined`, `plate`, `printed`, `shaft`, `shim`, or one
+defined in `config.processes`) picks default tolerances, notes and whether MMC,
+ISO 286 fits, hidden lines, shaft and flatness rules apply. Project specifics
+travel in `config` / `config_path`: processes, `extra_notes`, `plain_names`,
+`hole_overrides`, `projected_heights` (`{"M3": 6}` or `{"<part>|M3": 6}`,
+default 6 mm with a warning) and `bearings`. Feature recognition is the
+headless module `fcworkers/fcmcp_features.py` (fixture tests in
+`tests/test_features.py`), sent to the GUI with each call.
 
 ### Rules and layout engine
 

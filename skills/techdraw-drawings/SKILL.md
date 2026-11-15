@@ -1,6 +1,6 @@
 ---
 name: techdraw-drawings
-description: Make ASME Y14.5 manufacturing drawings of FreeCAD parts with the freecad-mcp TechDraw tools (techdraw_part_drawing, techdraw_annotate, techdraw_lint, techdraw_export). Use when asked for part drawings, GD&T, hole callouts, datum frames, a drawing package for fabrication, or to fix overlapping or crossing leaders and labels on a TechDraw sheet.
+description: Make ASME Y14.5 manufacturing drawings of FreeCAD parts with the freecad-mcp TechDraw tools (techdraw_part_drawing, techdraw_annotate, techdraw_lint, techdraw_verify, techdraw_export). Use when asked for part drawings, GD&T, hole callouts, datum frames, a drawing package for fabrication, or to fix overlapping or crossing leaders and labels on a TechDraw sheet.
 ---
 
 # TechDraw manufacturing drawings (freecad-mcp)
@@ -16,8 +16,13 @@ tools. This skill is the process and the judgement around them.
   **Never hand-draw SVG**, never post-edit an exported SVG/PDF, never fake a symbol with lines.
 - **Prebuilt first.** Use the bundled templates (`techdraw_list_templates`) and the tools' rules
   before writing custom drawing code.
-- **Zero conflicts, checked twice.** A sheet is done only when `conflicts.count == 0` (or
-  `techdraw_lint` is `clean`) *and* you have looked at the rasterised sheet yourself.
+- **Done = four checks, the last one independent.** A sheet is done only when `conflicts.count == 0`
+  (or `techdraw_lint` is `clean`), `techdraw_verify` has no errors, you have looked at the rasterised
+  sheet yourself, **and an independent reviewer** (a fresh subagent that sees the sheet and the model,
+  not your reasoning) found nothing. On the arm drawings the independent reviews found what every
+  automated check missed: wrong FAR SIDE, wrong hole counts, impossible processes.
+- **Project specifics belong in `config`,** not in the tool or in ad hoc code: process table, extra
+  notes, name rules (spacers, standoffs), projected heights, bearings.
 
 ## Which tool when
 
@@ -28,18 +33,21 @@ tools. This skill is the process and the judgement around them.
 | Custom sheet (sections, details, assembly views) | `techdraw_create_page` → `techdraw_add_views` → `techdraw_annotate(layout=true)` |
 | Title / tolerance block text | `techdraw_set_fields` (or `fields` in the spec) |
 | Re-export after edits, many pages | `techdraw_export` (`background=true` for batches, `png_dpi=110`) |
-| Check any sheet (open doc or saved `.FCStd`) | `techdraw_lint` (read-only) |
+| Layout check of any sheet (open doc or saved `.FCStd`) | `techdraw_lint` (read-only, GUI) |
+| Callouts vs the model (saved `.FCStd`) | `techdraw_verify` (read-only, headless: safe while the GUI is busy) |
 
 Export part shapes headless first (BREP or STEP path in `brep`) so the GUI does no modelling.
 
 ## Workflow
 
-1. **Spec the part.** For `techdraw_part_drawing` choose `process` (`machined`, `plate`,
-   `printed`): it sets the default position/profile tolerances and whether MMC, ISO 286 fits and
-   hidden lines apply. Give `tapped` (hole radius → thread, e.g. `{"1.25": "M3x0.5-6H"}`) for tapped
-   holes; give `projected_heights` measured from the assembly (thickest mating stack on the
-   screw-head side) instead of relying on the 6 mm default; `density_g_cm3` for the mass note;
-   `fields` for the title block; `notes` for material / finish / process.
+1. **Spec the part.** Write the project `config` once (or a JSON file for `config_path`):
+   `processes` (extend a built-in: `machined`, `plate`, `printed`, `shaft`, `shim` - title lines,
+   tolerance-block fields, position/profile values, notes with `@THREADS @MASK @INSERT @SHAFT
+   @SHIMMAT` tokens, `tapped` radius → thread map, fits `h7`/`ream`), `extra_notes` by part-name
+   prefix, `plain_names` (spacers/sleeves: no fits, no threads), `hole_overrides` (e.g. standoffs
+   tapped from both ends), `projected_heights` measured from the assembly (thickest mating stack on
+   the screw-head side; the 6 mm default raises a warning), `bearings`. Per sheet: `process`,
+   `part_name`, `instances` (sheet shared by several parts / mirror images), `fields`, `notes`.
 2. **Run it** with `png_dpi=110`, `return_image=true` for a single part (`background=true` and
    `job_status` for batches).
 3. **Read the reply, not just the status:**
@@ -57,11 +65,21 @@ Export part shapes headless first (BREP or STEP path in `brep`) so the GUI does 
    everything; look for: leaders converging on the same point, a leader landing on an ambiguous
    edge (profile leader next to a hole), text touching a frame, an unreadably small iso view,
    callouts far from their feature, anything that reads wrong to a machinist.
-5. **Fix with native objects**, then re-run the layout and re-check:
+5. **Verify against the model:** `techdraw_verify(path=...FCStd)`. Every error is a wrong sheet
+   (count, THRU/depth, FAR SIDE, counterbore/countersink, angle, uncalled holes, undefined datums).
+   Fix the cause (config, model, generator), not the text.
+6. **Fix with native objects**, then re-run the layout and re-check:
    `techdraw_annotate(items, layout=true)` → `techdraw_export` → `techdraw_lint(path=...FCStd)` →
-   look at the PNG again. Do not nudge coordinates by hand without re-linting.
-6. **Batch:** after all sheets are made, lint each saved `.FCStd` and inspect each PNG; report any
-   sheet you could not get to zero instead of shipping it.
+   `techdraw_verify` → look at the PNG again. Do not nudge coordinates by hand without re-linting.
+7. **Independent review (required, last).** Hand each sheet's PNG/PDF and the model (STEP) to a
+   fresh reviewer subagent with a narrow brief: "act as the machinist and the inspector: list every
+   DEFECT (wrong or missing information, ambiguity, a process the shop cannot do) with the callout
+   it concerns; probe the STEP to confirm". Do not give it your conclusions. Fix, regenerate, and
+   review again until a round finds nothing new; re-run lint and verify after every fix (fixes
+   regress other sheets: regenerate the whole batch, not only the sheet you touched).
+8. **Batch:** after all sheets are made, lint and verify each saved `.FCStd`, inspect each PNG and
+   review them; report any sheet you could not get clean instead of shipping it. The layout has a
+   time budget (`layout_budget_s`, 240 s); a sheet that hits it is reported with its conflicts.
 
 ## Annotating so the layout engine can help
 
@@ -89,6 +107,11 @@ Verified against the licensed ASME Y14.5-2018 copy:
 - App. B-4 — floating fastener T = H − F; fixed fastener T = (H − F)/2 with a projected zone.
 - §10.4.1 — projected tolerance zone (Ⓟ plus height) on tapped holes.
 
+Also applied, taken from the light_weight_arm generator's reviewed rules and not re-checked in
+this repository: §5.2.1 (fit shown as the tolerance symbol, `⌀4 H7`), §4.5.12 (countersink diameter
+and included angle in the callout), §11.3.1.4 / §11.3.1.5(b) (profile ALL OVER, its exception for
+directly toleranced features).
+
 **Not verified** (no copy checked): ASME Y14.41, Y14.100, Y14.2, and ISO 286 (the H7/k6 values,
 3–50 mm, were cross-checked only against the ISO 286-1 formulas and published examples). Do not
 cite these on drawings or claim compliance with them. Drawings cite Y14.5 only. Quote the
@@ -102,3 +125,8 @@ standard minimally and never copy it into a repository.
   signature needs an MCP server restart, which kills in-flight FreeCAD jobs. Coordinate first.
 - Datum letters: every letter used in an FCF must be defined on the sheet and no FCF may
   reference its own datum feature; `techdraw_lint` reports both.
+- Never run TechDraw from `execute_code_async`: it is refused outside `commit()` because it can
+  wedge FreeCAD. The GUI runs one job at a time and is often shared: ask before long GUI runs;
+  `techdraw_verify` and the feature tests are headless.
+- Feature recognition (`fcworkers/fcmcp_features.py`) is pure Part and fixture-tested
+  (`tests/test_features.py`): add a fixture before changing it.
