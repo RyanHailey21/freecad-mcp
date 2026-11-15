@@ -36,7 +36,8 @@ Caches live in `~/.cache/freecad-mcp` (override with `FREECAD_MCP_CACHE`);
 | `techdraw_view_geometry` | GUI | Compact circles / lines / extreme vertices of a view, to pick references. |
 | `techdraw_annotate` | GUI | Dimensions (incl. basic), datum symbols, FCFs, hole callouts, cosmetic geometry, notes. |
 | `techdraw_export` | GUI | PDF/SVG (+ PNG review image) for many pages, one GUI call per page. |
-| `techdraw_part_drawing` | GUI | One-call reduced-dimension part drawing(s) from a BREP or object, exported. |
+| `techdraw_part_drawing` | GUI | One-call reduced-dimension part drawing(s) from a BREP/STEP or object: ASME rules, overlap-free layout, exported. |
+| `techdraw_lint` | GUI | Read-only sheet check: label / leader / dimension-line conflicts, datums, metric text. |
 | `render_frames` | GUI | Assembly-simulation and/or camera-path frames in chunks; optional MP4. |
 | `encode_video` | server | PNG sequence → H.264 MP4 (ffmpeg / imageio-ffmpeg / Blender). |
 | `assembly_attach_view_providers` | GUI | Re-attach joint/simulation view providers in headless-built assemblies. |
@@ -114,6 +115,33 @@ References for dimensions can be names (`"Edge3"`) or geometric queries:
   "tapped": {"1.25": "M3x0.5-6H"}, "notes": ["MATERIAL: 6061-T6 ALUMINUM."]}],
  "out_dir": "C:/proj/drawings/out", "png_dpi": 110, "background": true}
 ```
+
+`process` (`machined` / `plate` / `printed`) picks default position and
+profile tolerances and whether MMC, ISO 286 fits and hidden lines apply;
+`projected_heights` (`{"M3": 6}` or `{"<part>|M3": 6}`) gives the projected
+tolerance zone for tapped holes (default 6 mm, with a warning).
+
+### Rules and layout engine
+
+`guiside/asme_rules.py` (pure functions, unit-tested) and `guiside/layout.py`
+(placement on TechDraw's own Qt scene) are ported from the light_weight_arm
+drawing generator and sent with every TechDraw call as the modules
+`fcmcp_asme_rules` / `fcmcp_layout`. The rules follow ASME Y14.5-2018 §4.3.1
+(metric values), §4.4.4 / §4.4.4.2 (leaders, radial to circles), Fig 6-30
+(FCF below the hole callout), App. B-4 and §10.4.1 (fixed fastener with a
+projected zone). ISO 286 H7/k6 values cover 3-50 mm and are not verified
+against the standard itself; Y14.41, Y14.100 and Y14.2 are not claimed.
+
+The layout reads object labels: `Datum_*` and leaderless `FCF_g<n>` carry no
+free leader, items whose labels end in `_g<n>` move as one unit, balloons with
+`Anchors` / `AnchorR` (techdraw_annotate `anchors` / `anchor_r`) get their
+leader re-attached radially to the best pattern instance. `techdraw_annotate`
+with `layout=true`, and `techdraw_part_drawing` (default), snap datum symbols
+onto their FCFs, try several placement orders, and report the remaining
+`conflicts` exactly as `techdraw_lint` does. The engine is tuned on the ANSI B
+sheet; other sizes are scaled, or pass `frame` / `keepout` boxes (page mm,
+Y up). A clean lint is necessary, not sufficient: look at the PNG too.
+Workflow guidance: `skills/techdraw-drawings/SKILL.md`.
 
 PNG review images need PyMuPDF (`pip install freecad-mcp[drawings]`, or any
 Python on PATH that has it; `FREECAD_MCP_PDF_PYTHON` picks one).

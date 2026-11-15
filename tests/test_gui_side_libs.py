@@ -96,7 +96,17 @@ def _load_pure(name, stub_names=("FreeCAD", "FreeCADGui")):
 
 
 def test_techdraw_tokens_and_scales():
-    ns = _load_pure("techdraw_lib")
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("fcmcp_asme_rules", GUISIDE / "asme_rules.py")
+    rules = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rules)
+    sys.modules["fcmcp_asme_rules"] = rules
+    try:
+        ns = _load_pure("techdraw_lib")
+    finally:
+        sys.modules.pop("fcmcp_asme_rules", None)
     assert ns["T"]("6X {dia}3.3 THRU {position}") == "6X ⌀3.3 THRU ⌖"
     assert ns["_fcf_text"]({"symbol": "position", "tolerance": "0.1", "diameter": True, "modifier": "mmc",
                             "datums": ["A", "B"]}) == "⌖|⌀0.1Ⓜ|A|B"
@@ -104,8 +114,15 @@ def test_techdraw_tokens_and_scales():
     assert ns["pick_scale"](100, 50, 205, 150) == 2
     assert ns["scale_txt"](0.5) == "1:2" and ns["scale_txt"](3) == "3:1" and ns["scale_txt"](0.75) == "3:4"
     assert ns["hole_text"]({"r": 1.25, "thru": False, "depth": 6.0}, {"1.25": "M3x0.5-6H"}) == "M3x0.5-6H ↧5.5"
+    # Y14.5 4.3.1: metric values without trailing zeros (was "↧3.0")
     assert ns["hole_text"]({"r": 1.65, "thru": True, "depth": 3, "cbore": (6.5, 3.0)}) == \
-        "⌀3.3 THRU  ⌴⌀6.5 ↧3.0"
+        "⌀3.3 THRU  ⌴⌀6.5 ↧3"
+    assert ns["hole_text"]({"r": 1.25, "thru": True, "depth": 5}, {"1.25": "M3x0.5-6H"}) == "M3x0.5-6H THRU"
+    # machined bearing seat / dowel hole: ISO 286 H7 fit; printed parts: no fit
+    assert ns["hole_text"]({"r": 7.5, "thru": False, "depth": 5}) == "⌀15 H7 (+0.018/0) ↧5"
+    assert ns["hole_text"]({"r": 1.5, "thru": True, "depth": 5}, None, "printed") == "⌀3 THRU"
+    assert ns["hole_text"]({"r": 2.0, "thru": True, "depth": 5, "dflat": 1.2}) == \
+        "⌀4 H7 (+0.012/0) D-BORE, FLAT 1.2 FROM ℄ THRU"
 
 
 def test_render_camera_path():

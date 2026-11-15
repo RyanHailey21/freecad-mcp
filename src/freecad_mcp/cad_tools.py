@@ -27,6 +27,14 @@ def _lib(name: str) -> str:
     return (_GUISIDE / f"{name}.py").read_text(encoding="utf-8")
 
 
+# helper modules the TechDraw library imports inside FreeCAD (pure ASME rules, Qt-scene layout engine)
+TECHDRAW_MODULES = {"fcmcp_asme_rules": "asme_rules", "fcmcp_layout": "layout"}
+
+
+def techdraw_modules() -> dict[str, str]:
+    return {mod: _lib(src) for mod, src in TECHDRAW_MODULES.items()}
+
+
 def _text(data: Any) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, indent=1, default=str))]
 
@@ -205,11 +213,14 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
     # ================================================================== TechDraw (GUI)
     td = lambda: _lib("techdraw_lib")  # noqa: E731
 
+    def run_td(fn: str, params: dict[str, Any], timeout: float = 90) -> Any:
+        return run_gui(get_connection(), td(), fn, params, timeout, modules=techdraw_modules())
+
     @tool
     def techdraw_list_templates(filter: str = "") -> list[TextContent]:
         """List FreeCAD's bundled TechDraw templates (relative to Mod/TechDraw/Templates), optionally filtered."""
         try:
-            return _text(run_gui(get_connection(), td(), "list_templates", {"filter": filter}))
+            return _text(run_td("list_templates", {"filter": filter}))
         except Exception as exc:
             return _err(exc)
 
@@ -233,7 +244,7 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
         Returns: doc/page names, template path, sheet size and all field names.
         """
         try:
-            return _text(run_gui(get_connection(), td(), "create_page", {
+            return _text(run_td("create_page", {
                 "doc": doc_name, "template": template, "fields": fields or {}, "page": page_name,
                 "new_document": new_document, "replace": replace}))
         except Exception as exc:
@@ -243,7 +254,7 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
     def techdraw_set_fields(doc_name: str, fields: dict[str, str], page_name: str = "Page") -> list[TextContent]:
         """Update a page template's editable text fields (title block, tolerance block ...)."""
         try:
-            return _text(run_gui(get_connection(), td(), "set_fields",
+            return _text(run_td("set_fields",
                                  {"doc": doc_name, "page": page_name, "fields": fields}))
         except Exception as exc:
             return _err(exc)
@@ -262,7 +273,7 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
         Waits until view geometry exists. Returns each (sub)view's name, position, scale and edge count.
         """
         try:
-            return _text(run_gui(get_connection(), td(), "add_views",
+            return _text(run_td("add_views",
                                  {"doc": doc_name, "page": page_name, "views": views, "wait": wait_s},
                                  timeout=max(90, wait_s + 30)))
         except Exception as exc:
@@ -273,13 +284,14 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
         """Compact geometry of a view for picking references: circles [edge, r, cx, cy], arcs, longest lines
         [edge, x0, y0, x1, y1, len], extreme vertices and circle radius counts (model mm from view centre)."""
         try:
-            return _text(run_gui(get_connection(), td(), "view_geometry",
+            return _text(run_td("view_geometry",
                                  {"doc": doc_name, "view": view_name, "limit": limit}))
         except Exception as exc:
             return _err(exc)
 
     @tool
-    def techdraw_annotate(doc_name: str, items: list[dict[str, Any]], page_name: str = "Page") -> list[TextContent]:
+    def techdraw_annotate(doc_name: str, items: list[dict[str, Any]], page_name: str = "Page",
+                          layout: bool = False) -> list[TextContent]:
         """Add native dimensions and GD&T to a page in one call.
 
         Item kinds ("view" = view name; origin/at/leader_to/center/p0/p1 in model mm from the view centre;
@@ -296,13 +308,21 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
                {"line": [[x0, y0], [x1, y1]]} | {"extreme": "xmin|xmax|ymin|ymax"}.
           cosmetic_circle: {"center", "r"}; cosmetic_line: {"p0", "p1"}; centerline: {"refs", "mode"}.
           note: {"lines": [...], "x", "y", "width", "size_pt", "frame"} or {"html": ...}.
+        Layout keys (any balloon/dimension item): "label" (layout reads labels), "group": n (items sharing n move
+          as one unit; datum -> Datum_<L>_g<n>, leaderless fcf -> FCF_g<n>), "anchors": [[x, y], ...] + "anchor_r"
+          (every instance of the hole pattern: the layout re-attaches the leader radially to the best one),
+          "font_size" (default 3.5 mm). Dimensions without "format" get the Y14.5 metric format (no trailing zeros).
+        layout: afterwards snap datum symbols onto their FCFs and run the overlap-free placement (opens the page);
+          the reply then has "conflicts" (labels / leaders / dimension_lines) as techdraw_lint reports them.
         Text tokens: {dia} {mmc} {lmc} {cbore} {csk} {depth} {deg} {pm} {sq} and every GD&T symbol name
         ({position}, {flatness}, {perpendicularity}, {profile_surface}, ...).
-        Returns created object names and per-item problems (e.g. unresolved references).
+        Returns created object names/labels, per-item problems (e.g. unresolved references) and "text_lint"
+        (Y14.5 4.3.1 metric value issues such as trailing zeros).
         """
         try:
-            return _text(run_gui(get_connection(), td(), "annotate",
-                                 {"doc": doc_name, "page": page_name, "items": items}, timeout=120))
+            return _text(run_td("annotate",
+                                 {"doc": doc_name, "page": page_name, "items": items, "layout": layout},
+                                 timeout=300 if layout else 120))
         except Exception as exc:
             return _err(exc)
 
@@ -350,7 +370,7 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
                 job.progress(i, len(pages), pg.get("doc", ""))
                 t = time.time()
                 try:
-                    res = run_gui(get_connection(), td(), "export_page", {
+                    res = run_td("export_page", {
                         "doc": pg["doc"], "page": pg.get("page", "Page"), "stem": pg.get("stem"), "out_dir": out_dir,
                         "pdf": pdf or bool(png_dpi), "svg": svg, "save_fcstd": save_fcstd, "close_view": close_view,
                         "close_document": close_document}, timeout=120)
@@ -382,23 +402,39 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
         return_image: bool = False,
         background: bool = False,
     ) -> list[TextContent | ImageContent]:
-        """One-call reduced-dimension part drawings (batch): sheet, views, dims, GD&T, notes, PDF.
+        """One-call reduced-dimension part drawings (batch): sheet, views, dims, GD&T, notes, layout, PDF.
 
-        For each spec a new drawing document is built in the GUI and exported (one GUI call per drawing):
-        the part is (optionally) re-oriented so X = longest / Z = thinnest extent, a third-angle projection
-        group (Front + Right [+ Top unless plate-like]) and an isometric view are placed at an auto scale,
-        overall size dimensions, datum A on the side view, grouped Y14.5 hole callouts with
-        perpendicularity/position FCFs and datums B/C, an optional all-around profile FCF and numbered notes
-        are added - all native TechDraw objects.
+        For each spec a new drawing document is built in the GUI and exported (one GUI call per drawing), with
+        the ASME Y14.5-2018 rules and overlap-free layout proven on the light_weight_arm drawings:
+        - orientation: Z = the axis most holes run along (else the thinnest extent), X = longest;
+        - third-angle Front + Right [+ Top unless plate-like] and an isometric view, largest standard scale that
+          keeps every view inside the frame (re-checked on the rendered page);
+        - overall dimensions only on the side where extension lines stay short, otherwise an envelope REF note;
+          round outlines get one diameter; datum A on the side view (or the diameter's axis for turned parts);
+        - holes: full circles from merged split arcs (hidden-only circles ignored), counterbored columns open at
+          both ends are THRU, grouped Y14.5 callouts with the position FCF directly below (Fig 6-30) and the
+          datum symbol attached to the FCF; DRF A|B(|C) from the pattern (R.drf); floating fasteners T = H - F at
+          MMC, tapped holes (fixed fastener) T = (H - F)/2 with a projected zone (App. B-4, 10.4.1);
+          machined bearing seats / dowel holes get ISO 286 H7, bearing journals k6;
+        - leaders attach radially to whichever pattern instance gives the shortest uncrossed leader, then the
+          layout engine snaps datums and moves labels until no label/leader/dimension-line conflict remains;
+        - a warning for every hole group that gets no callout (hidden in the front view or over max_callouts).
 
         Spec keys: "doc" (drawing document name, required), "brep" (path) or "source_doc" + "object",
-        "stem" (file stem), "template" (default ANSIB_Landscape), "fields" (title block values),
-        "density_g_cm3" (fills Weight), "scale" (else auto), "orient" (true), "projections", "hidden",
-        "iso", "overall_dims", "hole_callouts", "datums", "position_tolerance" ("0.1"),
-        "profile_tolerance", "tapped" ({"1.25": "M3x0.5-6H"} radius -> thread for blind holes), "notes"
-        (list of strings), "extra_items" (techdraw_annotate items), "save_fcstd" (true), "close" (true).
-        Tip: export part BREPs headless first (e.g. via the interference/hole tools' BREP store or
-        execute_code_headless) so the GUI does no modelling.
+        "stem" (file stem), "part_name", "template" (default ANSIB_Landscape), "fields" (title block values),
+        "process" ("machined" | "plate" | "printed": default tolerances, MMC/fits/hidden-line rules),
+        "density_g_cm3" (fills Weight + mass note), "scale" (else auto), "orient" (true), "projections",
+        "hidden", "iso", "overall_dims", "hole_callouts", "datums", "max_callouts" (7),
+        "position_tolerance" (floor / RFS value, default per process), "profile_tolerance" (default per
+        process; false = none), "tapped" ({"1.25": "M3x0.5-6H"} hole radius -> thread), "fits" (bool),
+        "bearings" ({"6700ZZ": [10, 15]} extra d x D sizes), "projected_heights" ({"M3": 6} or
+        {"<part>|M3": 6} mm; default 6 with a warning), "model_ref" (model file cited in note 1),
+        "model_note" (true), "notes" (list of strings), "extra_items" (techdraw_annotate items),
+        "layout" (true), "frame" / "keepout" (layout boxes, page mm, Y up; default scaled from ANSI B),
+        "save_fcstd" (true), "close" (true).
+        Reply per drawing: "conflicts" (should be count 0), "warnings", "text_lint", "problems", pdf/png paths.
+        Check the PNG visually as well (png_dpi=110); run techdraw_lint on the saved FCStd after edits.
+        Tip: export part BREPs headless first so the GUI does no modelling.
         """
 
         def work(job: Any) -> Any:
@@ -409,7 +445,7 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
                 job.progress(i, len(drawings), spec.get("doc", ""))
                 t = time.time()
                 try:
-                    res = run_gui(get_connection(), td(), "part_drawing", dict(spec, out_dir=out_dir), timeout=180)
+                    res = run_td("part_drawing", dict(spec, out_dir=out_dir), timeout=600)
                     _raster(res, png_dpi)
                     res["s"] = round(time.time() - t, 1)
                 except Exception as exc:
@@ -427,6 +463,30 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
                 if pngs:
                     reply.append(_image(pngs[0]))
             return reply
+        except Exception as exc:
+            return _err(exc)
+
+    @tool
+    def techdraw_lint(doc_name: str = "", path: str = "", page_name: str = "", frame: list[float] | None = None,
+                      keepout: list[list[float]] | None = None) -> list[TextContent]:
+        """Read-only drawing check on an open page (doc_name) or a saved .FCStd (path; opened, then closed).
+
+        Measures the rendered TechDraw scene and runs the layout engine's collision rules: labels on labels,
+        views or the title/tolerance block or outside the frame; leaders through labels or crossing other
+        leaders; leaders crossing dimension/extension lines. Also lists undefined or self-referenced datums,
+        Y14.5 4.3.1 text issues (trailing/missing zeros) and views outside the frame. Nothing is moved or saved.
+        frame / keepout: [x0, y0, x1, y1] page-mm boxes (Y up) if the template is not ANSI B-like.
+        A clean lint is necessary, not sufficient: also look at the exported PNG.
+        """
+        if not doc_name and not path:
+            return _err(ValueError("pass doc_name (open document) or path (.FCStd)"))
+        try:
+            params: dict[str, Any] = {"doc": doc_name, "path": path, "page": page_name}
+            if frame:
+                params["frame"] = frame
+            if keepout is not None:
+                params["keepout"] = keepout
+            return _text(run_td("lint", params, timeout=180))
         except Exception as exc:
             return _err(exc)
 
