@@ -449,41 +449,62 @@ def restore(doc, snap):
     _refresh(doc)
 
 
-def leader_quality(items):
-    """Sum of leader ranks (length + run over views) of the page's free leaders: lower reads better."""
+def leader_quality(items, with_length=False):
+    """Sum of leader ranks (length + run over views) of the page's free leaders: lower reads better.
+    with_length: (rank, plain length) - their ratio says how much leaders run across views."""
     VIEW_BOXES[:] = [v["box"] for v in items.values() if v["kind"] == "view"]
-    return sum(_rank(ld) for ld in (_leader(v) for v in items.values()) if ld is not None)
+    lds = [ld for ld in (_leader(v) for v in items.values()) if ld is not None]
+    q = sum(_rank(ld) for ld in lds)
+    if with_length:
+        return q, sum(math.hypot(ld[1][0] - ld[0][0], ld[1][1] - ld[0][1]) for ld in lds)
+    return q
+
+
+GOOD_RATIO = 1.25        # rank / length: leaders that barely run over views are accepted at once
+MIN_GAIN = 0.10          # another order must cut the leader rank by this fraction to count as better
+PATIENCE = 2             # stop once this many zero-conflict orders were tried without such a gain
 
 
 def best_layout(doc, page, orders=("default", "x", "-x", "y", "-y"), quality=True, time_budget=240.0):
     """auto_layout with retries: other unit orders from the same start, then a second, wider round
     (only if the first left collisions); keep the fewest collisions, ties to the best leader quality
-    (MCP port: length + run over views).  time_budget (s): no new attempt starts after it (one wide
-    search took 18 min on a dense sheet); the best layout found so far is kept."""
+    (MCP port: length + run over views).
+
+    The time budget is a ceiling, not a target: a zero-conflict layout whose leaders barely run over the
+    views (rank <= GOOD_RATIO x length) is accepted at once; otherwise the search stops after PATIENCE
+    zero-conflict orders in a row that do not improve the rank by MIN_GAIN.  Only remaining conflicts
+    keep it searching, and no new attempt starts after time_budget s (one wide search took 18 min)."""
     import time as _t
     t0 = _t.time()
     start = snapshot(doc)
     best = None
+    stale = 0
     tries = [(od, 3, 45.0) for od in orders] + [(od, 6, 90.0) for od in orders]   # 2nd round: wider search
     od, rem = None, []
     for i_, (od, ps_, mr_) in enumerate(tries):
         if i_ and best is not None and time_budget and _t.time() - t0 > time_budget:
             best[3].append("time budget %.0f s reached after %d attempts" % (time_budget, i_))
-            od = None
             break
         if i_ >= len(orders) and best is not None and not best[2]:
-            od = None
             break
         if i_:
             restore(doc, start)
         rep, _r = auto_layout(doc, page, passes=ps_, max_r=mr_, order=od)
         items = measure(doc, page)
         rem = collisions(items)
-        q = leader_quality(items) if quality else 0.0
+        q, length = leader_quality(items, True) if quality else (0.0, 0.0)
         tag = od + ("" if i_ < len(orders) else " wide")
         if best is None or (len(rem), q) < (len(best[2]), best[4]):
+            gain = best is not None and not best[2] and not rem and q < (1.0 - MIN_GAIN) * best[4]
+            stale = 0 if (best is None or best[2] or gain) else stale + 1
             best = (tag, snapshot(doc), rem, rep, q)
-        if not rem and not quality:
+        elif not rem:
+            stale += 1
+        if not rem and (not quality or q <= GOOD_RATIO * max(length, 1e-9)):
+            best[3].append("accepted %s: 0 conflicts, leader rank %.0f / length %.0f" % (tag, q, length))
+            break
+        if not best[2] and stale >= PATIENCE - 1 and i_ >= 1:
+            best[3].append("stopped after %d orders: no %.0f%% better leader rank" % (i_ + 1, 100 * MIN_GAIN))
             break
     restore(doc, best[1])
     return best[3] + ["order %s (leader rank %.0f, %.0f s)" % (best[0], best[4], _t.time() - t0)], best[2]
