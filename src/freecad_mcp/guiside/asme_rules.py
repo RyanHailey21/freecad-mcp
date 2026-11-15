@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 ASME drawing rules used by the drawing generator, encoded as plain functions (no FreeCAD import),
-so a generator, a linter or an MCP tool can share them.  Ported unchanged from the light_weight_arm
-project (cad/drawings/asme_rules.py); only the projected-height source is now passed in (set_proj_heights).
+so a generator, a linter or an MCP tool can share them.  Ported from the light_weight_arm
+project (cad/drawings/asme_rules.py, synced 2026-11-15); the projected-height source is passed in (set_proj_heights).
 
 References - VERIFIED against ASME Y14.5-2018 (licensed copy supplied by the user, 2026-11-14):
   Y14.5 4.3.1(b),(c)  millimetre values: whole numbers without decimal point or zero; no trailing zero
@@ -28,7 +28,8 @@ import math
 def mm(v, nd=2):
     """Metric dimension text: 38 / 38.5 / 0.25 (no trailing zeros, leading zero kept)."""
     s = ("%." + str(nd) + "f") % v
-    s = s.rstrip("0").rstrip(".")
+    if "." in s:                                # integers keep their zeros (80, not 8)
+        s = s.rstrip("0").rstrip(".")
     return "0" if s in ("-0", "") else s
 
 
@@ -53,7 +54,12 @@ def fit_text(d, internal):
         return None
     up, lo = b
     cls = "H7" if internal else "k6"
-    return "%s (%s/%s)" % (cls, ("+" + mm(up, 3)) if up else "0", ("+" + mm(lo, 3)) if lo else "0")
+    return cls                                   # Y14.5 5.2.1: basic size + tolerance symbol (no inline +a/b)
+
+
+def fit_limits(d, internal):
+    """ISO 286 deviations (mm) behind fit_text, for a limits table or a note: (upper, lower) or None."""
+    return _band(_H7 if internal else _K6, d)
 
 
 # rolling bearings used in the arm (d x D)

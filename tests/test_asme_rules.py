@@ -26,6 +26,9 @@ R = _load("asme_rules")
     (12.345, 2, "12.35"),
     (-0.001, 2, "0"),           # no "-0"
     (0.0, 3, "0"),
+    (80, 0, "80"),              # regression: integers keep their zeros (was "8")
+    (100.0, 1, "100"),
+    (120.50, 1, "120.5"),
 ])
 def test_metric_value_format(v, nd, txt):
     assert R.mm(v, nd) == txt
@@ -35,16 +38,18 @@ def test_dim_format_strips_trailing_zeros():
     assert R.DIM_FORMAT == "%.2w"
 
 
-@pytest.mark.parametrize("d, internal, txt", [
-    (15, True, "H7 (+0.018/0)"),     # 10-18 mm: IT7 = 18 um
-    (20, True, "H7 (+0.021/0)"),     # published worked example 20H7 +21 um
-    (40, True, "H7 (+0.025/0)"),     # 40H7 +25 um
-    (10, False, "k6 (+0.01/+0.001)"),
-    (12, False, "k6 (+0.012/+0.001)"),
-    (25, False, "k6 (+0.015/+0.002)"),
+@pytest.mark.parametrize("d, internal, txt, limits", [
+    (15, True, "H7", (0.018, 0.0)),        # 10-18 mm: IT7 = 18 um
+    (20, True, "H7", (0.021, 0.0)),        # published worked example 20H7 +21 um
+    (40, True, "H7", (0.025, 0.0)),        # 40H7 +25 um
+    (10, False, "k6", (0.010, 0.001)),
+    (12, False, "k6", (0.012, 0.001)),
+    (25, False, "k6", (0.015, 0.002)),
 ])
-def test_iso286_fits(d, internal, txt):
+def test_iso286_fits(d, internal, txt, limits):
+    # Y14.5 5.2.1: size + tolerance symbol only, no inline (+a/b)
     assert R.fit_text(d, internal) == txt
+    assert R.fit_limits(d, internal) == pytest.approx(limits)
 
 
 def test_fit_outside_table_is_none():

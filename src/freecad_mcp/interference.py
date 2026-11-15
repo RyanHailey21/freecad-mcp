@@ -26,7 +26,7 @@ from typing import Any, Iterable
 
 from .parallel import JsonCache, cache_root, default_workers, run_workers, split_balanced
 
-CACHE_VERSION = "1"
+CACHE_VERSION = "2"   # 2: geometry-hash fingerprints (moved holes no longer reuse stale BREPs)
 
 
 def _inv_mul(a: list[float], b: list[float]) -> list[float]:

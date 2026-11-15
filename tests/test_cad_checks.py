@@ -244,3 +244,32 @@ def test_hole_edge_check_statuses_and_cache(cache_env):
     loose = hole_edge_check({"python": str(prov)}, fail_wall=0.4, workers=1, command=FC)
     assert loose["summary"]["computed"] == 1          # thresholds are part of the cache key
     assert not any(row["status"] == "FAIL" for row in loose["rows"])
+
+
+@needs_fc
+def test_fingerprint_sees_a_moved_hole():
+    """Regression: volume/area/counts/bbox are identical when a hole moves; the fingerprint must differ."""
+    from pathlib import Path
+
+    from freecad_mcp.headless import run_headless
+
+    workers = Path(ic.__file__).with_name("fcworkers")
+    code = textwrap.dedent(f'''
+        import sys
+        sys.path.insert(0, {str(workers)!r})
+        import FreeCAD as App, Part
+        import fcmcp_common as C
+        V = App.Vector
+        plate = Part.makeBox(40, 20, 5)
+        a = plate.cut(Part.makeCylinder(2, 5, V(10, 10, 0)))
+        b = plate.cut(Part.makeCylinder(2, 5, V(25, 10, 0)))       # same hole, moved 15 mm
+        c = plate.cut(Part.makeCylinder(2, 5, V(10, 10, 0)))       # rebuilt identical part
+        same = abs(a.Volume - b.Volume) < 1e-6 and abs(a.Area - b.Area) < 1e-6 and \
+            len(a.Faces) == len(b.Faces) and a.BoundBox.isInside(b.BoundBox.Center)
+        print("RESULT", same, C.fingerprint(a) != C.fingerprint(b), C.fingerprint(a) == C.fingerprint(c),
+              C.FINGERPRINT_VERSION)
+    ''')
+    res = run_headless(code, 120, FC)
+    line = [ln for ln in res.get("output", "").splitlines() if ln.startswith("RESULT")]
+    assert line, res
+    assert line[0].split()[1:] == ["True", "True", "True", "g2"]

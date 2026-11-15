@@ -119,10 +119,10 @@ def test_techdraw_tokens_and_scales():
         "⌀3.3 THRU  ⌴⌀6.5 ↧3"
     assert ns["hole_text"]({"r": 1.25, "thru": True, "depth": 5}, {"1.25": "M3x0.5-6H"}) == "M3x0.5-6H THRU"
     # machined bearing seat / dowel hole: ISO 286 H7 fit; printed parts: no fit
-    assert ns["hole_text"]({"r": 7.5, "thru": False, "depth": 5}) == "⌀15 H7 (+0.018/0) ↧5"
+    assert ns["hole_text"]({"r": 7.5, "thru": False, "depth": 5}) == "⌀15 H7 ↧5"
     assert ns["hole_text"]({"r": 1.5, "thru": True, "depth": 5}, None, "printed") == "⌀3 THRU"
     assert ns["hole_text"]({"r": 2.0, "thru": True, "depth": 5, "dflat": 1.2}) == \
-        "⌀4 H7 (+0.012/0) D-BORE, FLAT 1.2 FROM ℄ THRU"
+        "⌀4 H7 D-BORE, FLAT 1.2 FROM ℄ THRU"
 
 
 def test_render_camera_path():

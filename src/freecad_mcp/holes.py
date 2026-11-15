@@ -18,7 +18,7 @@ from .parallel import JsonCache, cache_root, default_workers, run_workers, split
 
 DEFAULT_OPTS = dict(fail_wall=1.0, warn_wall=1.5, warn_ratio=0.5, min_d=2.0, max_d=12.0, tangent_deg=3.0,
                     search_margin=8.0)
-HOLES_VERSION = "1"
+HOLES_VERSION = "1g2"  # g2: geometry-hash fingerprints
 
 
 def hole_edge_check(

@@ -74,13 +74,50 @@ class Progress:
 
 
 # ------------------------------------------------------------------ geometry keys
+FINGERPRINT_VERSION = "g2"     # bump whenever fingerprint() changes: old BREP/pair/hole cache keys are ignored
+
+
+def _face_key(f):
+    """Face descriptor in the shape's own frame: surface type, area, centroid and normal/axis (1 um grid)."""
+    t = f.Surface.__class__.__name__
+    try:
+        c = f.CenterOfMass
+    except Exception:
+        c = f.BoundBox.Center
+    extra = ""
+    srf = f.Surface
+    for attr in ("Axis", "Normal"):           # cylinder/cone axis, or plane normal (orientation-insensitive)
+        v = getattr(srf, attr, None)
+        if v is not None:
+            try:
+                x, y, z = float(v.x), float(v.y), float(v.z)
+                if (x, y, z) < (0.0, 0.0, 0.0):
+                    x, y, z = -x, -y, -z
+                extra += "%s%.4f,%.4f,%.4f" % (attr[0], x, y, z)
+            except Exception:
+                pass
+            break
+    for attr in ("Radius", "Center"):
+        v = getattr(srf, attr, None)
+        if isinstance(v, float):
+            extra += "r%.4f" % v
+    return "%s|%.3f|%.3f,%.3f,%.3f|%s" % (t, f.Area, c.x, c.y, c.z, extra)
+
+
 def fingerprint(shape):
-    """Stable, cheap geometry fingerprint of a shape in its own frame (16 hex chars)."""
+    """Geometry fingerprint of a shape in its own frame (16 hex chars).
+
+    Volume, area, topology counts and the bounding box alone do not change when a hole moves, which made
+    the interference/hole caches reuse a stale BREP (false clashes and, worse, false clears). The sorted
+    per-face descriptors (type, area, centroid, axis/normal, radius) do."""
     b = shape.BoundBox
-    s = "%.3f/%.3f/%d/%d/%d/%.3f,%.3f,%.3f,%.3f,%.3f,%.3f" % (
-        shape.Volume, shape.Area, len(shape.Faces), len(shape.Edges), len(shape.Vertexes),
+    s = "%s/%.3f/%.3f/%d/%d/%d/%.3f,%.3f,%.3f,%.3f,%.3f,%.3f" % (
+        FINGERPRINT_VERSION, shape.Volume, shape.Area, len(shape.Faces), len(shape.Edges), len(shape.Vertexes),
         b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax)
-    return hashlib.sha1(s.encode()).hexdigest()[:16]
+    h = hashlib.sha1(s.encode())
+    for k in sorted(_face_key(f) for f in shape.Faces):
+        h.update(k.encode())
+    return h.hexdigest()[:16]
 
 
 def mat12(placement):
