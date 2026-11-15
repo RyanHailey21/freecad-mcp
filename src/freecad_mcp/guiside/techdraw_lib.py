@@ -1083,8 +1083,7 @@ def part_drawing(p):  # noqa: C901 - one sheet, top to bottom
     mass = shape.Volume * density / 1000.0 if density else None
     fields = dict(proc.get("tol") or {})
     for k_, f_ in (("DrawingTitle2", "title2"), ("DrawingTitle3", "title3")):
-        if proc.get(f_):
-            fields[k_] = proc[f_]
+        fields[k_] = proc.get(f_) or ""               # never leave the template's "Drawing Title 2" placeholder
     fields.update(p.get("fields") or {})
     if mass is not None and "Weight" not in fields:
         fields["Weight"] = R.mm(mass, 1) + " g"
