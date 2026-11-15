@@ -10,10 +10,12 @@ callouts), rich annotations.  Each movable that collides is moved to the nearest
 (spiral search); leaders/extension lines follow automatically.  Returns a report; the
 page is re-measured after moving, and remaining collisions are listed.
 Scene units: 0.1 mm, Y down  ->  page mm: x/10, -y/10.
-Ported from the light_weight_arm project (cad/drawings/layout.py); two fixes: measure() includes a
+Ported from the light_weight_arm project (cad/drawings/layout.py, synced 2026-11-15: view/hole
+obstacles for leaders, callout shoulder in the box, same-group abutting, wide second round,
+snap_allover); MCP additions: measure() includes a
 balloon's drawn frame (and an FCF-attached datum's triangle), not only its text; leader options are
 ranked by length plus a penalty for running across a view (_rank), and best_layout compares every
-placement order on leader quality.  FRAME / TEMPLATE are
+placement order on leader quality, under a time budget.  FRAME / TEMPLATE are
 tuned on the ASME ANSI B landscape sheet; configure() rescales them for another sheet size or sets
 them explicitly (frame / keep-out boxes in page mm, Y up).
 """
@@ -23,6 +25,7 @@ import time
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import Part  # noqa: F401  (arm parity: feature-datum snapping, off by default)
 
 FRAME = (21.0, 21.0, 410.0, 258.0)                 # inner drawing frame, page mm (x0, y0, x1, y1), Y up
 TEMPLATE = [(194.0, 19.0, 412.0, 70.5)]            # tolerance block + title block
@@ -196,7 +199,9 @@ def measure(doc, page):
                        if type(k).__name__ == "QGraphicsPathItem" and abs(k.zValue() - 111) < 0.5]
                 box = _union([box] + [r for r in shp if r[0] <= mx <= r[2] and r[1] <= my <= r[3]])
                 # ... and a datum symbol attached to an FCF owns its triangle + attachment line up to the FCF
-                if obj.Label.startswith("Datum_") and re.search(r"_g\d+$", obj.Label):
+                if getattr(obj, "BubbleShape", "") == "None" and obj.Label.startswith(("Call_", "Prof_")):
+                    box = (box[0] - 4.0, box[1], box[2] + 4.0, box[3])   # the landing line (shoulder) is part
+                if obj.Label.startswith("Datum_") and re.search(r"_g\d+$", obj.Label):   # of the callout
                     o_ = _origin(obj)
                     if o_ is not None:
                         box = _union([box, (min(box[0], o_[0]), box[1], max(box[2], o_[0]), box[3])])
@@ -317,6 +322,44 @@ def _set_origin(v, o):
     v["obj"].OriginY = (o[1] - cy) / v["s"]
 
 
+def _obstacles(items):
+    """Views (by object name) and every callout target hole (page centre, radius) on the sheet."""
+    views = {v["obj"].Name: v["box"] for v in items.values() if v["kind"] in ("view", "isoview")}
+    holes = []
+    for v in items.values():
+        if v.get("anchors") and v.get("ar", 0) > 0:
+            holes += [(a, v["ar"]) for a in v["anchors"]]
+    return views, holes
+
+
+def _leader_hits(ld, src_view, views, holes):
+    """A leader may cross only its own view, and may touch only its own target hole."""
+    o, e = ld
+    for nm, b in views.items():
+        if nm != src_view and _seg_box(o, e, b, 0.6):
+            return "leader through view " + nm
+    for c, r in holes:
+        if math.hypot(c[0] - o[0], c[1] - o[1]) <= r + 0.5:
+            continue                                 # this is the leader's own target
+        if _pt_seg(c, o, e) < r + 0.4:
+            return "leader through a hole"
+    return None
+
+
+def _src(v):
+    try:
+        return v["obj"].SourceView.Name
+    except Exception:
+        return None
+
+
+def _same_group(v, w):
+    """Callout / FCF / attached datum of ONE group abut by design (Y14.5 Fig 6-30, 3.3.3)."""
+    m1 = re.search(r"_g(\d+)$", v["obj"].Label)
+    m2 = re.search(r"_g(\d+)$", w["obj"].Label)
+    return bool(m1 and m2 and m1.group(1) == m2.group(1))
+
+
 def _refresh(doc, n=4):
     doc.recompute()
     for _ in range(n):
@@ -337,23 +380,30 @@ def collisions(items):
                 bad.append((k, "on view/template"))
                 break
         for k2, v2 in mov[i + 1:]:
-            if _inter(b, v2["box"], -0.3):
+            if _inter(b, v2["box"], -0.3) and not _same_group(v, v2):
                 bad.append((k, "on " + k2))
     # leaders: through other labels, across dimension/extension lines, across other leaders
     lds = [(k, _leader(v)) for k, v in mov]
     lds = [(k, l) for k, l in lds if l is not None]
     segs = [(k, sg) for k, v in items.items() for sg in v.get("segs", [])]
+    views_, holes_ = _obstacles(items)
     for k, (a0, a1) in lds:
+        why_ = _leader_hits((a0, a1), _src(items[k]), views_, holes_)
+        if why_:
+            bad.append((k, why_))
         for k2, v2 in mov:
-            if k2 != k and _seg_box(a0, a1, v2["box"]):
+            if k2 != k and _seg_box(a0, a1, v2["box"], 0.4 if _same_group(items[k], v2) else -0.8):
                 bad.append((k, "leader through " + k2))
-        for k2, (s0, s1) in segs:
-            if _conflict(a0, a1, s0, s1):
-                bad.append((k, "leader crosses " + k2))
+        L_ = math.hypot(a1[0] - a0[0], a1[1] - a0[1])
+        t_ = min(1.0, 1.0 / L_) if L_ > 1e-9 else 1.0
+        a0t = (a0[0] + (a1[0] - a0[0]) * t_, a0[1] + (a1[1] - a0[1]) * t_)   # the leader STARTS on the
+        for k2, (s0, s1) in segs:                                            # feature, which may be collinear
+            if t_ < 1.0 and _conflict(a0t, a1, s0, s1):                      # with an extension line: test
+                bad.append((k, "leader crosses " + k2))                      # from 1 mm out
                 break
     for i, (k, (a0, a1)) in enumerate(lds):
         for k2, (b0, b1) in lds[i + 1:]:
-            if _conflict(a0, a1, b0, b1):
+            if _conflict(a0, a1, b0, b1, gap=2.0):
                 bad.append((k, "leader crosses leader " + k2))
     return bad
 
@@ -405,26 +455,38 @@ def leader_quality(items):
     return sum(_rank(ld) for ld in (_leader(v) for v in items.values()) if ld is not None)
 
 
-def best_layout(doc, page, orders=("default", "x", "-x", "y", "-y"), quality=True):
-    """auto_layout with retries: other unit orders from the same start, keep the fewest collisions.
-    MCP port: with quality, every order is tried and ties on collisions go to the shortest leaders
-    that stay off the views (leader_quality); without it, the first collision-free order wins."""
+def best_layout(doc, page, orders=("default", "x", "-x", "y", "-y"), quality=True, time_budget=240.0):
+    """auto_layout with retries: other unit orders from the same start, then a second, wider round
+    (only if the first left collisions); keep the fewest collisions, ties to the best leader quality
+    (MCP port: length + run over views).  time_budget (s): no new attempt starts after it (one wide
+    search took 18 min on a dense sheet); the best layout found so far is kept."""
+    import time as _t
+    t0 = _t.time()
     start = snapshot(doc)
     best = None
-    for od in orders:
-        if od != orders[0]:
+    tries = [(od, 3, 45.0) for od in orders] + [(od, 6, 90.0) for od in orders]   # 2nd round: wider search
+    od, rem = None, []
+    for i_, (od, ps_, mr_) in enumerate(tries):
+        if i_ and best is not None and time_budget and _t.time() - t0 > time_budget:
+            best[3].append("time budget %.0f s reached after %d attempts" % (time_budget, i_))
+            od = None
+            break
+        if i_ >= len(orders) and best is not None and not best[2]:
+            od = None
+            break
+        if i_:
             restore(doc, start)
-        rep, _r = auto_layout(doc, page, order=od)
+        rep, _r = auto_layout(doc, page, passes=ps_, max_r=mr_, order=od)
         items = measure(doc, page)
         rem = collisions(items)
         q = leader_quality(items) if quality else 0.0
+        tag = od + ("" if i_ < len(orders) else " wide")
         if best is None or (len(rem), q) < (len(best[2]), best[4]):
-            best = (od, snapshot(doc), rem, rep, q)
+            best = (tag, snapshot(doc), rem, rep, q)
         if not rem and not quality:
             break
-    if best[0] != od or rem:
-        restore(doc, best[1])
-    return best[3] + ["order %s (leader rank %.0f)" % (best[0], best[4])], best[2]
+    restore(doc, best[1])
+    return best[3] + ["order %s (leader rank %.0f, %.0f s)" % (best[0], best[4], _t.time() - t0)], best[2]
 
 
 def auto_layout(doc, page, passes=3, max_r=45.0, step=2.0, order="default"):
@@ -434,6 +496,7 @@ def auto_layout(doc, page, passes=3, max_r=45.0, step=2.0, order="default"):
         items = measure(doc, page)
         fixed = [v["box"] for v in items.values() if v["kind"] == "view"] + TEMPLATE
         VIEW_BOXES[:] = [v["box"] for v in items.values() if v["kind"] == "view"]
+        views_, holes_ = _obstacles(items)
         dimsegs = [sg for v in items.values() for sg in v.get("segs", [])]
         placed = []
         leaders = []                                  # (unit id, segment) of placed units
@@ -448,14 +511,16 @@ def auto_layout(doc, page, passes=3, max_r=45.0, step=2.0, order="default"):
 
             chosen = {}
 
-            def lead_ok(ld, own=()):
-                if any(_seg_box(ld[0], ld[1], q) for q in placed):
+            def lead_ok(ld, own=(), v_=None):
+                if v_ is not None and _leader_hits(ld, _src(v_), views_, holes_):
+                    return _why("leader through view/hole")
+                if any(_seg_box(ld[0], ld[1], q, -0.8) for q in placed):
                     return _why("leader through placed label")
                 if any(_seg_box(ld[0], ld[1], q) for q in own):
                     return _why("leader through own group")
                 if any(_conflict(ld[0], ld[1], s0, s1) for s0, s1 in other_dimsegs):
                     return _why("leader on dim line")
-                if any(_conflict(ld[0], ld[1], s0, s1) for _u, (s0, s1) in leaders):
+                if any(_conflict(ld[0], ld[1], s0, s1, gap=2.0) for _u, (s0, s1) in leaders):
                     return _why("leader on leader")
                 return True
 
@@ -467,7 +532,7 @@ def auto_layout(doc, page, passes=3, max_r=45.0, step=2.0, order="default"):
                         continue
                     own = [(v2["box"][0] + dx, v2["box"][1] + dy, v2["box"][2] + dx, v2["box"][3] + dy)
                            for k2, v2 in unit if k2 != k_]
-                    pick = next((ld for ld in opts if lead_ok(ld, own)), None)
+                    pick = next((ld for ld in opts if lead_ok(ld, own, v)), None)
                     if pick is None:
                         return _why("no leader option")
                     chosen[k_] = pick
@@ -599,3 +664,16 @@ def views_outside_frame(doc, page):
     items = measure(doc, page)
     return [k for k, v in items.items() if v["kind"] in ("view", "isoview") and
             (v["box"][0] < FRAME[0] or v["box"][1] < FRAME[1] or v["box"][2] > FRAME[2] or v["box"][3] > FRAME[3])]
+
+
+def snap_allover(doc, page):
+    """'ALL OVER' (Y14.5 11.3.1.5(b)) centred just beneath the profile FCF, measured after layout."""
+    items = measure(doc, page)
+    fcf_ = [v for v in items.values() if v["obj"].Label == "Prof_g99"]
+    ao = [o for o in doc.Objects if o.Label == "AllOver_g99"]
+    if not fcf_ or not ao:
+        return False
+    b = fcf_[0]["box"]
+    ao[0].X, ao[0].Y = (b[0] + b[2]) / 2.0, b[1] - 3.4
+    _refresh(doc)
+    return True

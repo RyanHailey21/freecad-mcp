@@ -29,10 +29,14 @@ def _lib(name: str) -> str:
 
 # helper modules the TechDraw library imports inside FreeCAD (pure ASME rules, Qt-scene layout engine)
 TECHDRAW_MODULES = {"fcmcp_asme_rules": "asme_rules", "fcmcp_layout": "layout"}
+_FCWORKERS = Path(__file__).with_name("fcworkers")
 
 
 def techdraw_modules() -> dict[str, str]:
-    return {mod: _lib(src) for mod, src in TECHDRAW_MODULES.items()}
+    mods = {mod: _lib(src) for mod, src in TECHDRAW_MODULES.items()}
+    # feature recognition is pure Part: the same module runs headless (tests, workers) and in the GUI
+    mods["fcmcp_features"] = (_FCWORKERS / "fcmcp_features.py").read_text(encoding="utf-8")
+    return mods
 
 
 def _text(data: Any) -> list[TextContent]:
@@ -420,9 +424,18 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
           layout engine snaps datums and moves labels until no label/leader/dimension-line conflict remains;
         - a warning for every hole group that gets no callout (hidden in the front view or over max_callouts).
 
+        Project specifics go in "config" (dict) or "config_path" (JSON file), not in the tool:
+          "processes": {name: {title2, title3, pos, prof, tol {template fields}, notes [...], mmc, fits
+            ("h7" | "ream" | null), tapped {radius: thread}, projected, journals, two_view, hidden, shaft,
+            flatness, insert_d, density, base (built-in profile to extend)}} - built-ins: machined, plate,
+            printed, shaft, shim; note tokens @THREADS @MASK @INSERT @SHAFT @SHIMMAT @THK {step} {dxf};
+          "extra_notes": {part-name prefix: note}; "plain_names": regex (spacers/sleeves: no fits, no threads);
+          "hole_overrides": [{"names": regex, "diameter", "tol", "text" ({t}, {tap_depth})}];
+          "projected_heights", "bearings", "template", "note_hex" (true).
         Spec keys: "doc" (drawing document name, required), "brep" (path) or "source_doc" + "object",
-        "stem" (file stem), "part_name", "template" (default ANSIB_Landscape), "fields" (title block values),
-        "process" ("machined" | "plate" | "printed": default tolerances, MMC/fits/hidden-line rules),
+        "stem" (file stem), "part_name" (matched by config name rules), "instances" (names sharing this sheet:
+        QTY / mirror-image note), "qty_per" ("PER ROBOT"), "template" (default ANSIB_Landscape), "fields",
+        "process" (a built-in or config process: default tolerances, MMC/fits/hidden-line/shaft rules),
         "density_g_cm3" (fills Weight + mass note), "scale" (else auto), "orient" (true), "projections",
         "hidden", "iso", "overall_dims", "hole_callouts", "datums", "max_callouts" (7),
         "position_tolerance" (floor / RFS value, default per process), "profile_tolerance" (default per
@@ -430,7 +443,8 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
         "bearings" ({"6700ZZ": [10, 15]} extra d x D sizes), "projected_heights" ({"M3": 6} or
         {"<part>|M3": 6} mm; default 6 with a warning), "model_ref" (model file cited in note 1),
         "model_note" (true), "notes" (list of strings), "extra_items" (techdraw_annotate items),
-        "layout" (true), "frame" / "keepout" (layout boxes, page mm, Y up; default scaled from ANSI B),
+        "layout" (true), "layout_budget_s" (240: no new layout attempt after it), "frame" / "keepout" (layout
+        boxes, page mm, Y up; default scaled from ANSI B), "dxf_ref",
         "save_fcstd" (true), "close" (true).
         Reply per drawing: "conflicts" (should be count 0), "warnings", "text_lint", "problems", pdf/png paths.
         Check the PNG visually as well (png_dpi=110); run techdraw_lint on the saved FCStd after edits.

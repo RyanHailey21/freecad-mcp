@@ -157,17 +157,74 @@ def _vertices(view):
     return out
 
 
+def _sig(v):
+    es = _edges(v)
+    if not es:
+        return None
+    xs = [p for _i, e in es for p in (e.Vertexes[0].Point.x, e.Vertexes[-1].Point.x)]
+    ys = [p for _i, e in es for p in (e.Vertexes[0].Point.y, e.Vertexes[-1].Point.y)]
+    return (len(es), round(min(xs), 3), round(max(xs), 3), round(min(ys), 3), round(max(ys), 3))
+
+
 def wait_views(doc, views, timeout=30.0):
+    """Views are done when their HLR geometry is present AND unchanged over 3 polls (TechDraw computes in a
+    background thread: an early read can return partial geometry and a vertex numbering that changes).
+    Stable *stale* geometry also passes this; part_drawing adds an extent check (stale-geometry guard)."""
     import FreeCADGui as Gui
+    views = [v for v in views if v.isDerivedFrom("TechDraw::DrawViewPart")]
     end = time.time() + timeout
+    last, same = None, 0
     while True:
         doc.recompute()
         Gui.updateGui()
-        if all(_edges(v) for v in views if v.isDerivedFrom("TechDraw::DrawViewPart")):
-            return True
+        busy = any(getattr(v, "isComputing", lambda: False)() for v in views if hasattr(v, "isComputing"))
+        sig = None if busy else tuple(_sig(v) for v in views)
+        if sig is not None and None not in sig:
+            same = same + 1 if sig == last else 0
+            last = sig
+            if same >= 2:
+                return True
         if time.time() > end:
-            return False
-        time.sleep(0.25)
+            return bool(sig) and None not in sig
+        time.sleep(0.3)
+
+
+def refresh_views(doc, views=None, timeout=30.0):
+    """Re-run hidden-line removal at the views' CURRENT scale (items do not recompute on a scale change
+    alone) and wait for stable geometry - before anything is measured, laid out or exported."""
+    views = views or [o for o in doc.Objects if o.TypeId in ("TechDraw::DrawProjGroupItem", "TechDraw::DrawViewPart",
+                                                             "TechDraw::DrawViewSection", "TechDraw::DrawViewDetail")]
+    for v in views:
+        v.touch()
+    doc.recompute()
+    return wait_views(doc, views, timeout)
+
+
+def rebind_dims(doc):
+    """Re-point vertex dimensions at the vertices that are at their recorded positions (RefPts) now:
+    TechDraw renumbers vertices on recompute."""
+    n = 0
+    for d in doc.Objects:
+        rp = getattr(d, "RefPts", "")
+        if d.TypeId != "TechDraw::DrawViewDimension" or not rp:
+            continue
+        view = d.References2D[0][0]
+        verts = _vertices(view)
+        new = []
+        for t in rp.split(";"):
+            x, y = (float(c) for c in t.split(","))
+            hit = [i for i, q in verts if abs(q.x - x) < 1e-3 and abs(q.y - y) < 1e-3]
+            if not hit:
+                break
+            new.append("Vertex%d" % hit[0])
+        if len(new) == len(rp.split(";")):
+            old = list(d.References2D[0][1]) if isinstance(d.References2D[0][1], (list, tuple)) else \
+                [r[1] for r in d.References2D]
+            if old != new:
+                d.References2D = [(view, r) for r in new]
+                n += 1
+    doc.recompute()
+    return n
 
 
 def place(page, v, x=None, y=None, scale=None):
@@ -492,6 +549,20 @@ def annotate(p):
                 d = doc.addObject("TechDraw::DrawViewDimension", name)
                 d.Type = it.get("type", "Distance")
                 d.References2D = [(view, r) for r in refs]
+                pts = []                               # remember WHERE the vertices are: TechDraw renumbers
+                for r in refs:                         # them on recompute; rebind_dims() re-resolves them
+                    if r.startswith("Vertex"):
+                        try:
+                            q = view.getVertexByIndex(int(r[6:])).Point
+                            pts.append("%.5f,%.5f" % (q.x, q.y))
+                        except Exception:
+                            pass
+                if pts and len(pts) == len(refs):
+                    try:
+                        d.addProperty("App::PropertyString", "RefPts", "Layout")
+                        d.RefPts = ";".join(pts)
+                    except Exception:
+                        pass
                 fmt = it.get("format")
                 if fmt is None and R is not None and d.Type != "Angle":   # Y14.5 4.3.1 metric values
                     fmt = {"Diameter": "⌀", "Radius": "R"}.get(d.Type, "") + R.DIM_FORMAT
@@ -655,15 +726,18 @@ def _classify(doc, remaining):
 def run_layout(doc, page, p=None):
     """Datum symbols onto their FCFs, then the retrying overlap-free placement; re-measured conflicts."""
     p = p or {}
-    if not p.get("page_open"):
-        doc.recompute()
-        _open_page(doc, page)
+    refresh_views(doc)                            # HLR at the current scale before anything is measured
+    _open_page(doc, page)
     _configure_layout(page, p)
     L._refresh(doc)
+    rebound = rebind_dims(doc)                    # vertex dimensions back onto their recorded points
+    L._refresh(doc)
     snapped = L.snap_datums(doc, page)            # first, so the layout moves each finished group as one unit
-    report, _rem = L.best_layout(doc, page)
+    L.snap_allover(doc, page)                     # ALL OVER under the profile FCF, before layout too
+    report, _rem = L.best_layout(doc, page, time_budget=float(p.get("layout_budget_s", 240)))
     remaining = L.collisions(L.measure(doc, page))
-    return {"report": report, "datums_snapped": snapped, "conflicts": _classify(doc, remaining)}
+    return {"report": report, "datums_snapped": snapped, "dims_rebound": rebound,
+            "conflicts": _classify(doc, remaining)}
 
 
 def _datum_check(doc):
@@ -732,15 +806,38 @@ def lint(p):
 
 
 # ------------------------------------------------------------------ one-call part drawing
-# Ported from the light_weight_arm batch generator (cad/drawings/batch_drawings.py): hole-axis-aware
-# orientation, hole table with counterbore THRU detection, full circles from merged split arcs, overall
-# dimensions only where extension lines stay short, Y14.5 Fig 6-30 callout blocks (FCF below the callout,
-# datum symbol on the FCF), movable leader anchors, then the layout engine.
+# Ported from the light_weight_arm batch generator (cad/drawings/batch_drawings.py + make_drawings.py,
+# synced 2026-11-15 after three independent drawing reviews).  Feature recognition is the headless module
+# fcmcp_features (F); project specifics (process table, extra notes, name rules) come in p["config"].
+import re as _re
+
 SCALES = [10, 5, 4, 3, 2, 1.5, 1, 0.75, 0.5, 0.4, 0.3, 0.25, 0.2, 0.1, 0.05]
-PROCESS = {   # default position / profile tolerance and rule switches per manufacturing process
-    "machined": dict(pos="0.05", prof="0.1", mmc=True, fits=True, hidden=True, two_view=False),
-    "plate": dict(pos="0.1", prof="0.2", mmc=True, fits=False, hidden=False, two_view=True),
-    "printed": dict(pos="0.2", prof="0.3", mmc=False, fits=False, hidden=True, two_view=False),
+DIA, MMC, CBORE, DEPTH, CSK = "⌀", "Ⓜ", "⌴", "↧", "⌵"
+# Built-in process profiles.  Flags: mmc (position at MMC per fastener rules), fits ("h7": H7 on bearing
+# seats + dowel holes | "ream": bearing seats finished REAM/BORE | None), tapped (hole radius -> thread),
+# projected (projected tolerance zone on tapped holes), journals (k6 journal callouts), two_view, hidden,
+# shaft (datum A on the diameter, h6 diameter), flatness (FCF on the datum face), insert_d (heat-set insert
+# hole diameter), density (g/cm3).  Notes may use the tokens @THREADS @MASK @INSERT @SHAFT @SHIMMAT @CSK
+# @THK {step} {dxf}; "; HOLES MARKED REAM/BORE..." is dropped when the part has no finished holes.
+TAPPED_DEFAULT = {"1.25": "M3x0.5-6H", "1.40": "M3x0.5-6H", "1.70": "M4x0.7-6H", "2.10": "M5x0.8-6H"}
+PROCESS = {
+    "machined": dict(title2="", title3="", pos="0.05", prof="0.1", tol={}, mmc=True, fits="h7",
+                     tapped=TAPPED_DEFAULT, projected=True, journals=True, two_view=False, hidden=True, density=2.70,
+                     notes=["@MASK", "BREAK ALL SHARP EDGES 0.2-0.4.", "@THREADS"]),
+    "plate": dict(title2="", title3="", pos="0.1", prof="0.2", tol={}, mmc=True, fits="ream", tapped={},
+                  projected=False, journals=False, two_view=True, hidden=False, density=1.55,
+                  notes=["CUT PROFILE AND THRU HOLES FROM {dxf} (1:1, mm); HOLES MARKED REAM/BORE: CUT 0.3 UNDERSIZE "
+                         "ON DIA, THEN FINISH TO THE CALLOUT."]),
+    "printed": dict(title2="", title3="", pos="0.2", prof="0.3", tol={}, mmc=False, fits="ream", tapped={},
+                    projected=False, journals=False, two_view=False, hidden=True, density=1.30, insert_d=4.0,
+                    notes=["PRINT FROM STEP {step}; HOLES MARKED REAM/BORE: PRINT 0.3 UNDERSIZE ON DIA, THEN FINISH TO "
+                           "THE CALLOUT.", "@INSERT"]),
+    "shaft": dict(title2="", title3="", pos="0.05", prof="0.05", tol={}, mmc=False, fits=None, tapped={},
+                  projected=False, journals=False, two_view=False, hidden=True, shaft=True, density=7.85,
+                  notes=["@SHAFT"]),
+    "shim": dict(title2="", title3="", pos="0.05", prof="0.1", tol={}, mmc=False, fits=None, tapped={},
+                 projected=False, journals=False, two_view=True, hidden=False, flatness="0.02", density=7.9,
+                 notes=["@SHIMMAT"]),
 }
 MATE_CLEAR = {"M3": 3.3, "M4": 4.5, "M5": 5.5}
 
@@ -758,157 +855,111 @@ def pick_scale(w, h, max_w, max_h, scales=SCALES):
     return scales[-1]
 
 
-def _hole_axis_counts(shape):
-    cnt = [set(), set(), set()]
-    for f in shape.Faces:
-        srf = f.Surface
-        if srf.__class__.__name__ != "Cylinder" or not (0.9 <= srf.Radius <= 12.5):
-            continue
-        u0, u1, v0, v1 = f.ParameterRange
-        p_ = f.valueAt((u0 + u1) / 2, (v0 + v1) / 2)
-        n = f.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
-        ax, c = V(srf.Axis), V(srf.Center)
-        radial = (p_ - c) - ax * ((p_ - c).dot(ax))
-        if radial.Length < 1e-9 or n.dot(radial) > 0:
-            continue
-        for i, comp in enumerate((ax.x, ax.y, ax.z)):
-            if abs(abs(comp) - 1) < 1e-3:
-                cnt[i].add((round(c.x, 1), round(c.y, 1), round(c.z, 1), round(srf.Radius, 2)))
-    return [sum(k[3] for k in c) for c in cnt]      # weighted by radius: the main bore sets the view axis
+def _F():
+    import fcmcp_features
+    return fcmcp_features
 
 
 def oriented(shape):
-    """Copy re-axed for drawing: Z = the axis most holes run along (else the thinnest),
-    X = longest remaining extent; centred in XY, Z from 0."""
-    s = shape.copy()
-    bb = s.BoundBox
-    Ls = [bb.XLength, bb.YLength, bb.ZLength]
-    hc = _hole_axis_counts(s)
-    zax = max(range(3), key=lambda i: (hc[i], -Ls[i])) if max(hc) > 0 else min(range(3), key=lambda i: Ls[i])
-    rest = sorted([i for i in range(3) if i != zax], key=lambda i: -Ls[i])
-    order = [rest[0], rest[1], zax]
-    cols = [V(*[1.0 if k == i else 0.0 for k in range(3)]) for i in order]
-    m = App.Matrix(cols[0].x, cols[0].y, cols[0].z, 0, cols[1].x, cols[1].y, cols[1].z, 0,
-                   cols[2].x, cols[2].y, cols[2].z, 0, 0, 0, 0, 1)
-    if m.determinant() < 0:                       # keep right-handed: flip the view axis
-        m.A31, m.A32, m.A33 = -m.A31, -m.A32, -m.A33
-    s.transformShape(m)
-    c = s.BoundBox.Center
-    s.translate(V(-c.x, -c.y, -s.BoundBox.ZMin))
-    return s
+    return _F().oriented(shape)
 
 
 def hole_table(shape):
-    """Round holes from concave cylinders, grouped by (axis, diameter, depth/thru, cbore)."""
-    zmin, zmax = shape.BoundBox.ZMin, shape.BoundBox.ZMax
-    holes = {}
-    for f in shape.Faces:
-        srf = f.Surface
-        if srf.__class__.__name__ != "Cylinder" or not (0.9 <= srf.Radius <= 12.5):
-            continue
-        u0, u1, v0, v1 = f.ParameterRange
-        p = f.valueAt((u0 + u1) / 2, (v0 + v1) / 2)
-        n = f.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
-        ax, c = V(srf.Axis), V(srf.Center)
-        radial = (p - c) - ax * ((p - c).dot(ax))
-        if radial.Length < 1e-9 or n.dot(radial) > 0:
-            continue
-        az = abs(ax.z) > 0.999
-        bb = f.BoundBox
-        zr = (round(bb.ZMin, 1), round(bb.ZMax, 1)) if az else (round(c.z, 2),)   # coaxial holes at different depths stay separate
-        key = (round(c.x, 2), round(c.y, 2), zr, az, round(srf.Radius, 2))
-        h = holes.setdefault(key, dict(r=srf.Radius, x=c.x, y=c.y, axial=az, z0=1e9, z1=-1e9, span=0.0,
-                                        ax=ax, c=c, t0=1e9, t1=-1e9))
-        h["z0"], h["z1"] = min(h["z0"], bb.ZMin), max(h["z1"], bb.ZMax)
-        for vx in f.Vertexes:                       # extent ALONG the hole axis (side holes: not the z box)
-            tt = (vx.Point - h["c"]).dot(h["ax"])
-            h["t0"], h["t1"] = min(h["t0"], tt), max(h["t1"], tt)
-        h["span"] += math.degrees(u1 - u0)
-    full = []
-    for h in holes.values():
-        if h["span"] >= 359.0:
-            full.append(h)
-        elif h["span"] >= 270.0:                 # D-bore: chord flat at r*cos(half the missing arc)
-            df = h["r"] * math.cos(math.radians((360.0 - h["span"]) / 2.0))
-            if h["r"] - df > 0.1:                  # a real flat; a 0.0x chord is a slit/seam artefact
-                h["dflat"] = df
-            full.append(h)
-    # attach coaxial counterbores to their through hole
-    res = []
-    for h in sorted(full, key=lambda h: h["r"]):
-        if h["axial"]:
-            h["thru"] = h["z0"] <= zmin + 0.01 and h["z1"] >= zmax - 0.01
-            h["depth"] = h["z1"] - h["z0"]
-        else:
-            h["depth"] = h["t1"] - h["t0"]
-            e0, e1 = h["c"] + h["ax"] * (h["t0"] - 0.3), h["c"] + h["ax"] * (h["t1"] + 0.3)
-            try:
-                h["thru"] = (not shape.isInside(e0, 1e-4, True)) and (not shape.isInside(e1, 1e-4, True))
-            except Exception:
-                h["thru"] = False
-        res.append(h)
-    by_xy = {}
-    for h in res:
-        if h["axial"]:
-            by_xy.setdefault((round(h["x"], 1), round(h["y"], 1)), []).append(h)
+    return _F().hole_table(shape)
 
-    def _open(x, y, z):
-        try:
-            return not shape.isInside(V(x, y, z), 1e-4, True)
-        except Exception:
-            return False
-    final = []
-    for k, hs in by_xy.items():
-        hs.sort(key=lambda h: h["r"])
-        base = hs[0]
-        base["cbore"] = None
-        for big in hs[1:]:
-            if big["r"] > base["r"] + 0.05 and not big["thru"]:
-                base["cbore"] = (2 * big["r"], big["depth"])
-        lo = min(h_["z0"] for h_ in hs)
-        hi = max(h_["z1"] for h_ in hs)
-        if _open(base["x"], base["y"], lo - 0.3) and _open(base["x"], base["y"], hi + 0.3):
-            base["thru"] = True                         # column (bore + counterbore) open at both ends
-        final.append(base)
-    side = [h for h in res if not h["axial"]]
-    return final, side, zmax - zmin
+
+def process_profile(name, config=None):
+    """Built-in profile, overlaid with config["processes"][name] (a config may also add new processes)."""
+    cfg = (config or {}).get("processes") or {}
+    base = dict(PROCESS.get(name) or PROCESS.get((cfg.get(name) or {}).get("base", "machined")) or PROCESS["machined"])
+    base.update(cfg.get(name) or {})
+    return base
 
 
 def _tapped_thread(h, tapped):
     tapped = tapped or {}
-    for k in ("%.2f" % h["r"], "%g" % round(h["r"], 2)):
+    for k in ("%.2f" % h["r"], "%g" % round(h["r"], 2), "%.1f" % h["r"]):
         if k in tapped:
             return tapped[k]
     return None
 
 
-def hole_text(h, tapped=None, process="machined", fits=None):
-    """Y14.5 hole note (metric values per 4.3.1). tapped: {"1.25": "M3x0.5-6H"} maps a hole radius to a thread;
-    machined parts with fits get H7 on bearing seats and dowel holes (ISO 286)."""
-    if fits is None:
-        fits = PROCESS.get(process, PROCESS["machined"])["fits"]
+def _override(h, name, t, config):
+    """config["hole_overrides"]: [{"names": regex, "diameter": d, "tol": 0.1, "text": "..."}]; text tokens
+    {t} (part thickness) and {tap_depth} (min(8, max(t/2 - 2, 4)): tapped from both ends of a rod)."""
     d = 2 * h["r"]
-    t = _tapped_thread(h, tapped)
-    if t:
+    for ov in (config or {}).get("hole_overrides") or []:
+        if ov.get("names") and not _re.search(ov["names"], name or ""):
+            continue
+        if abs(d - float(ov["diameter"])) <= float(ov.get("tol", 0.1)):
+            return T(ov["text"]).format(t=R.mm(t, 1), tap_depth=R.mm(min(8.0, max(t / 2 - 2.0, 4.0)), 1))
+    return None
+
+
+def hole_text(h, tapped=None, process="machined", fits=None, proc=None, plain=False, t=0.0, name="", config=None):
+    """Y14.5 hole callout text (metric values per 4.3.1, fits as the tolerance symbol only per 5.2.1):
+    thread or diameter, fit, D-bore, THRU / depth / EACH SIDE, counterbore (+ FAR SIDE), countersink with
+    its included angle (+ FAR SIDE, 4.5.12)."""
+    proc = proc or process_profile(process)
+    if fits is True:
+        fits = proc.get("fits") or "h7"
+    elif fits is None:
+        fits = proc.get("fits")
+    if plain:
+        fits, tapped = None, {}
+    elif tapped is None:
+        tapped = proc.get("tapped") or {}
+    ov = _override(h, name, t, config)
+    if ov:
+        return ov
+    d = 2 * h["r"]
+    thr = _tapped_thread(h, tapped)
+    if thr:
         if h["thru"]:
-            return "%s THRU" % t
-        return "%s ↧%s" % (t, R.mm(max(h["depth"] - 0.5, 1.0), 1))
-    s = "⌀" + R.mm(d, 2)
-    if fits and (R.bearing_seat(d, True) or R.dowel_hole(d)):
-        ft = R.fit_text(d, True)
-        if ft:
-            s += " " + ft
+            return "%s THRU" % thr
+        return "%s %s%s%s" % (thr, DEPTH, R.mm(max(h["depth"] - 1.5, 1.0), 1),   # >= 3P tap runout
+                              " EACH SIDE" if h.get("each_side") else "")
+    s = DIA + R.mm(d, 2)
+    cb_seat = bool(h.get("cbore")) and fits and R.bearing_seat(h["cbore"][0], True)
+    if fits == "h7" and not cb_seat and (R.bearing_seat(d, True) or R.dowel_hole(d)):
+        s += " " + R.fit_text(d, True)
+    elif fits == "ream" and not cb_seat and R.bearing_seat(d, True) and not h.get("dflat"):
+        s += " " + R.fit_text(d, True) + (" REAM" if d <= 20 else " BORE")     # a reamer cannot finish a D-bore
+    if proc.get("insert_d") and abs(d - float(proc["insert_d"])) < 0.05:
+        s += " INSERT"
     if h.get("dflat"):
         s += " D-BORE, FLAT %s FROM ℄" % R.mm(h["dflat"], 2)
-    s += " THRU" if h["thru"] else " ↧%s" % R.mm(h["depth"], 1)
+    s += " THRU" if h["thru"] else " %s%s%s" % (DEPTH, R.mm(h["depth"], 1), " EACH SIDE" if h.get("each_side") else "")
     if h.get("cbore"):
-        s += "  ⌴⌀%s ↧%s" % (R.mm(h["cbore"][0], 1), R.mm(h["cbore"][1], 1))
+        s += "  %s%s%s%s %s%s%s" % (CBORE, DIA, R.mm(h["cbore"][0], 1),
+                                 (" " + R.fit_text(h["cbore"][0], True)) if cb_seat else "", DEPTH, R.mm(h["cbore"][1], 1),
+                                 " FAR SIDE" if h.get("cb_far") else "")
+    if h.get("csk"):
+        cd, ang, far = h["csk"]
+        s += "  %s%s%s X %s°%s" % (CSK, DIA, R.mm(cd, 1), R.mm(round(ang), 0), " FAR SIDE" if far else "")
     return s
 
 
-def full_circles(view):
-    """Holes as TechDraw draws them: arcs grouped by (centre, radius) whose spans add up to a full
-    circle (circles are often split in two at a seam). Slot-end half-arcs are excluded."""
+def _view_k(view):
+    """Factor between getVisible/HiddenEdges (page units: x scale, y flipped) and getEdgeByIndex (model
+    units), derived from the data itself rather than trusted from view.Scale."""
+    sc_ = float(getattr(view, "Scale", 1.0)) or 1.0
+    try:
+        ve_, ie_ = view.getVisibleEdges() or [], [e for _i, e in _edges(view)]
+        if ve_ and ie_:
+            wi = max(e.BoundBox.XMax for e in ie_) - min(e.BoundBox.XMin for e in ie_)
+            if wi > 1e-9:
+                sc_ = (max(e.BoundBox.XMax for e in ve_) - min(e.BoundBox.XMin for e in ve_)) / wi
+    except Exception:
+        pass
+    return sc_
+
+
+def full_circles(view, hidden_ok=False):
+    """Holes as TechDraw draws them: arcs grouped by (centre, radius) whose spans add up to a full circle
+    (split circles merged; slot-end half arcs excluded).  hidden_ok adds circles drawn only hidden (FAR SIDE
+    features), converted from page units; otherwise hidden-only circles are dropped."""
+    import Part
     acc = {}
     for i, e in _edges(view):
         c = e.Curve
@@ -917,29 +968,48 @@ def full_circles(view):
         k = (round(c.Center.x, 3), round(c.Center.y, 3), round(c.Radius, 3))
         a = acc.setdefault(k, [i, c, 0.0])
         a[2] += abs(e.LastParameter - e.FirstParameter)
-    out = [(i, c) for (i, c, span) in acc.values() if span >= 1.5 * math.pi]    # full circles + D-bores (slot ends are 180 deg)
+    out = [(i, c) for (i, c, span) in acc.values() if span >= 1.5 * math.pi]
+    if hidden_ok:
+        try:
+            sc_ = _view_k(view)
+            seen_ = {(round(c.Center.x, 2), round(c.Center.y, 2), round(c.Radius, 2)) for _i, c in out}
+            hacc = {}
+            for e in view.getHiddenEdges() or []:
+                c = e.Curve
+                if c.__class__.__name__ != "Circle":
+                    continue
+                k_ = (round(c.Center.x / sc_, 2), round(-c.Center.y / sc_, 2), round(c.Radius / sc_, 2))
+                hacc[k_] = hacc.get(k_, 0.0) + abs(e.LastParameter - e.FirstParameter)
+            for k_, span in hacc.items():
+                if span >= 1.5 * math.pi and k_ not in seen_:
+                    seen_.add(k_)
+                    out.append((-1, Part.Circle(V(k_[0], k_[1], 0), V(0, 0, 1), k_[2])))
+        except Exception:
+            pass
+        return out
     return [ic for ic in out if not _hidden_circle(view, ic[1])]   # never point a leader at a hidden line
 
 
-def _circle_keys(edges):
+def _circle_keys(edges, sc=1.0):
     ks = set()
     for e in edges or []:
         c = getattr(e, "Curve", None)
         if c is not None and c.__class__.__name__ == "Circle":
             for sy in (1, -1):
-                ks.add((round(c.Center.x, 2), round(sy * c.Center.y, 2), round(c.Radius, 2)))
+                ks.add((round(c.Center.x / sc, 1), round(sy * c.Center.y / sc, 1), round(c.Radius / sc, 1)))
     return ks
 
 
 def _hidden_circle(view, c):
     """True if this circle is drawn only as a hidden line (far-face hole seen through the part)."""
     try:
-        vis, hid = _circle_keys(view.getVisibleEdges()), _circle_keys(view.getHiddenEdges())
+        sc_ = _view_k(view)
+        vis, hid = _circle_keys(view.getVisibleEdges(), sc_), _circle_keys(view.getHiddenEdges(), sc_)
     except Exception:
         return False
     if not vis and not hid:
         return False
-    k = (round(c.Center.x, 2), round(c.Center.y, 2), round(c.Radius, 2))
+    k = (round(c.Center.x, 1), round(c.Center.y, 1), round(c.Radius, 1))
     return k in hid and k not in vis
 
 
@@ -972,31 +1042,54 @@ def _part_shape(p):
     return Part.getShape(_obj(sdoc, p["object"]), "", needSubElement=False, refine=False, transform=False)
 
 
-def part_drawing(p):
+def _own(cs, hs):
+    """Circles at THIS group's hole positions (front view: x = X, y = +/-Y), not any circle of that radius."""
+    for sy in (1, -1):
+        m_ = [c for c in cs if any(abs(c.Center.x - h_["x"]) < 0.1 and abs(c.Center.y - sy * h_["y"]) < 0.1 for h_ in hs)]
+        if m_:
+            return m_
+    return []
+
+
+def part_drawing(p):  # noqa: C901 - one sheet, top to bottom
     """Complete reduced-dimension part drawing from one shape (see the MCP tool docstring)."""
+    F = _F()
+    config = p.get("config") or {}
+    if p.get("config_path"):
+        import json as _json
+        with open(p["config_path"], encoding="utf-8") as fh:
+            config = dict(_json.load(fh), **config)
     proc_name = p.get("process") or "machined"
-    if proc_name not in PROCESS:
-        raise ValueError("process must be one of %s" % sorted(PROCESS))
-    proc = PROCESS[proc_name]
-    if p.get("bearings"):
-        R.BEARINGS.update({k: tuple(v) for k, v in p["bearings"].items()})
+    proc = process_profile(proc_name, config)
+    if p.get("tapped") is not None:
+        proc["tapped"] = p["tapped"]
+    if p.get("fits") is not None:                     # False: no fits; True: the process default (or H7); or "h7"/"ream"
+        proc["fits"] = (proc.get("fits") or "h7") if p["fits"] is True else (p["fits"] or None)
+    bearings = dict(config.get("bearings") or {}, **(p.get("bearings") or {}))
+    if bearings:
+        R.BEARINGS.update({k: tuple(v) for k, v in bearings.items()})
         R.BEARING_OD[:] = sorted({D for _d, D in R.BEARINGS.values()})
         R.BEARING_ID[:] = sorted({d for d, _D in R.BEARINGS.values()})
-    R.set_proj_heights(p.get("projected_heights") or {})
+    R.set_proj_heights(dict(config.get("projected_heights") or {}, **(p.get("projected_heights") or {})))
     part_name = p.get("part_name") or p.get("stem") or p["doc"]
+    plain = bool(config.get("plain_names") and _re.search(config["plain_names"], part_name))
     warnings = []
     shape = _part_shape(p)
     if p.get("orient", True):
-        shape = oriented(shape)
+        shape = F.oriented(shape)
     bb = shape.BoundBox
     Lx, Ly, Lz = bb.XLength, bb.YLength, bb.ZLength
-    density = float(p.get("density_g_cm3", 0) or 0)
+    density = float(p.get("density_g_cm3") or proc.get("density") or 0)
     mass = shape.Volume * density / 1000.0 if density else None
-    fields = dict(p.get("fields") or {})
+    fields = dict(proc.get("tol") or {})
+    for k_, f_ in (("DrawingTitle2", "title2"), ("DrawingTitle3", "title3")):
+        if proc.get(f_):
+            fields[k_] = proc[f_]
+    fields.update(p.get("fields") or {})
     if mass is not None and "Weight" not in fields:
         fields["Weight"] = R.mm(mass, 1) + " g"
-    info = create_page({"doc": p["doc"], "template": p.get("template") or "ANSIB_Landscape", "fields": fields,
-                        "replace": True})
+    info = create_page({"doc": p["doc"], "template": p.get("template") or config.get("template") or "ANSIB_Landscape",
+                        "fields": fields, "replace": True})
     doc = App.getDocument(info["doc"])
     page = doc.getObject(info["page"])
     W, H = info["size_mm"]
@@ -1009,11 +1102,11 @@ def part_drawing(p):
     thin = Lz < 0.15 * Ly                             # plate-like: a top view would be a sliver
     projections = p.get("projections")
     if projections is None:
-        projections = ["Right"] if (proc["two_view"] or thin) else ["Right", "Top"]
+        projections = ["Right"] if (proc.get("two_view") or thin) else ["Right", "Top"]
     three = "Top" in projections
     sc = float(p["scale"]) if p.get("scale") else pick_scale(
         Lx + Lz + (40 if three else 25), Ly + (Lz + 30 if three else 0), 215.0 * kx, (140.0 if three else 110.0) * ky)
-    hidden = bool(p.get("hidden", proc["hidden"]))
+    hidden = bool(p.get("hidden", proc.get("hidden", True)))
     pg = doc.addObject("TechDraw::DrawProjGroup", "ProjGroup")
     page.addView(pg)
     pg.Source = [part]
@@ -1026,21 +1119,23 @@ def part_drawing(p):
         if pr != "Front":
             subs[pr] = pg.addProjection(pr)
     side, topv = subs.get("Right"), subs.get("Top")
+    for v in pg.Views:                                # hidden lines ON before the first compute, or
+        v.HardHidden = hidden                         # getHiddenEdges() stays empty
 
-    def _set_scale(val):                              # every item at the sheet scale, not just the anchor
-        pg.ScaleType = "Custom"
+    def _set_scale(val):                              # every item at the sheet scale, not just the anchor,
+        pg.ScaleType = "Custom"                       # and touched: items do not re-run HLR on a scale change
         pg.Scale = val
         for v_ in pg.Views:
             if hasattr(v_, "ScaleType"):
                 v_.ScaleType = "Custom"
             v_.Scale = val
+            v_.touch()
+        doc.recompute()
     _set_scale(sc)
     for prop, val in (("AutoDistribute", True), ("spacingX", 35.0), ("spacingY", 35.0)):
         if hasattr(pg, prop):
             setattr(pg, prop, val)
     pg.X, pg.Y = (150 * kx, 150 * ky) if three else (120 * kx, 165 * ky)   # 3-view: room left of the front view
-    for v in pg.Views:
-        v.HardHidden = hidden
     views = list(pg.Views)
     iso, isc = None, None
     if p.get("iso", True):
@@ -1052,9 +1147,10 @@ def part_drawing(p):
         iso.Label = "Iso"
         views.append(iso)
     wait_views(doc, views, float(p.get("wait", 40)))
-    # any projection-group view outside the frame -> next smaller standard scale
-    if not p.get("scale"):
-        for _ in range(4):
+    grp_views = list(pg.Views)
+    if not p.get("scale"):                           # any projection-group view outside the frame -> smaller scale
+        for _ in range(5):
+            refresh_views(doc, grp_views + ([iso] if iso else []), 20)   # measured: refresh like export does
             _open_page(doc, page, 2)
             L._refresh(doc)
             out = [k for k in L.views_outside_frame(doc, page) if not k.startswith("Iso")]
@@ -1062,12 +1158,27 @@ def part_drawing(p):
                 break
             sc = SCALES[SCALES.index(sc) + 1] if sc in SCALES else pick_scale(1, 1, sc * 0.99, sc * 0.99)
             _set_scale(sc)
-            wait_views(doc, list(pg.Views), 20)
+            wait_views(doc, grp_views, 20)
     tpl = page.Template
     et = dict(tpl.EditableTexts)
-    if "scale" in et and "scale" not in fields:
+    if "scale" in et and "scale" not in (p.get("fields") or {}):
         et["scale"] = scale_txt(sc)
         tpl.EditableTexts = et
+    wait_views(doc, grp_views, 20)                    # settled geometry before reading vertices
+
+    # stale-geometry guard: a view's x-extent must equal the part's true extent (front/top: Lx, side: Lz);
+    # geometry left over from an earlier scale is stable, so polling for "no change" cannot catch it
+    def _xext(v):
+        bbs = [e.BoundBox for _i, e in _edges(v)]
+        return (max(b.XMax for b in bbs) - min(b.XMin for b in bbs)) if bbs else 0.0
+    want = [(front, Lx)] + ([(side, Lz)] if side is not None else []) + ([(topv, Lx)] if topv is not None else [])
+    for _try in range(6):
+        bad_ = [v for v, L_ in want if abs(_xext(v) - L_) > 0.02 * L_ + 0.05]
+        if not bad_:
+            break
+        refresh_views(doc, bad_, 20)
+    else:
+        warnings.append("view geometry did not settle to the part extents (stale HLR)")
 
     items = []
     fv = front.Name
@@ -1077,46 +1188,53 @@ def part_drawing(p):
     vyl, yl = _real_extreme(front, 1, True)
     vyh, yh = _real_extreme(front, 1, False)
     ebb = [e_.BoundBox for _i, e_ in _edges(front)]
-    if ebb and vxl and vyl:                           # true outline extents (a circle has only seam vertices)
-        exl, exh = min(b.XMin for b in ebb), max(b.XMax for b in ebb)
-        eyl, eyh = min(b.YMin for b in ebb), max(b.YMax for b in ebb)
-        vert_ok = (xh - xl) > 0.9 * (exh - exl) and (yh - yl) > 0.9 * (eyh - eyl)
-        xl, xh, yl, yh = exl, exh, eyl, eyh
-    elif ebb:
-        xl, xh = min(b.XMin for b in ebb), max(b.XMax for b in ebb)
-        yl, yh = min(b.YMin for b in ebb), max(b.YMax for b in ebb)
-        vert_ok = False
-    else:
+    if not ebb:
         raise RuntimeError("front view has no geometry")
+    exl, exh = min(b.XMin for b in ebb), max(b.XMax for b in ebb)
+    eyl, eyh = min(b.YMin for b in ebb), max(b.YMax for b in ebb)
+    vert_ok = bool(vxl and vyl) and (xh - xl) > 0.9 * (exh - exl) and (yh - yl) > 0.9 * (eyh - eyl)
+    xl, xh, yl, yh = exl, exh, eyl, eyh               # true outline extents (a circle has only seam vertices)
     circles = full_circles(front)                     # holes only (split arcs merged), not slot-end arcs
+    circles_all = full_circles(front, hidden_ok=True)
     big = max(circles, key=lambda ic: ic[1].Radius) if circles else None
     ext = max(xh - xl, yh - yl, 1e-6)
     round_part = big is not None and 0.9 * ext <= 2 * big[1].Radius <= 1.05 * ext
     want_dims = p.get("overall_dims", True)
+    shaft = bool(proc.get("shaft"))
+    REF = "(%.1w)"                                    # reference sizes: parentheses, 1 decimal
     if round_part:
         cx_, cy_, rr = big[1].Center.x, big[1].Center.y, big[1].Radius
         xl, xh, yl, yh = cx_ - rr, cx_ + rr, cy_ - rr, cy_ + rr
         if want_dims:
+            hc_ = [cc for (_i, cc) in circles_all if cc.Radius < rr - 0.05]
+
+            def _clear(th):
+                return all(abs(-math.sin(th) * (cc.Center.x - cx_) + math.cos(th) * (cc.Center.y - cy_)) >
+                           cc.Radius + 1.0 / sc for cc in hc_)
+            ths = sorted((math.radians(a_) for a_ in range(0, 180, 3)), key=lambda th: abs(th - math.radians(45)))
+            th_ = next((th for th in ths if _clear(th)), math.radians(45))   # the diameter line crosses no hole
             items.append(dict(kind="dimension", view=fv, refs=["Edge%d" % big[0]], type="Diameter",
-                              format="⌀" + R.DIM_FORMAT, at=[rr * sc + 12, rr * sc + 10], name="Dim_D"))
+                              format=DIA + R.DIM_FORMAT, name="Dim_D",
+                              at=[(cx_ + math.cos(th_) * rr) * sc + math.cos(th_) * 14,
+                                  (cy_ + math.sin(th_) * rr) * sc + math.sin(th_) * 14]))
 
     def vpt(nm):
         return front.getVertexByIndex(int(nm[6:])).Point
     skipped = []
-    dimw_x = None                                     # model-x of the width dimension line
+    dimw_x = None                                     # model-x of the width/diameter dimension line
     # extension lines on the side where they are shortest; if they would run across most of the part either
     # way, the envelope is given as a REF note instead (the profile is basic, from the model)
     if want_dims and not round_part and vxl and vxh and vert_ok:
         pa, pb = vpt(vxl), vpt(vxh)
-        below, above = max(pa.y - yl, pb.y - yl), max(yh - pa.y, yh - pb.y)   # longest extension line per side
+        below, above = max(pa.y - yl, pb.y - yl), max(yh - pa.y, yh - pb.y)
         if min(below, above) > 0.25 * (yh - yl) + 2.0:
             skipped.append("L")
         else:
             yoff = -(yh - yl) * sc / 2 - 14 if below <= above else (yh - yl) * sc / 2 + 14
-            items.append(dict(kind="dimension", view=fv, refs=[vxl, vxh], type="DistanceX",
-                              format="(" + R.DIM_FORMAT + ")", at=[0, yoff], name="Dim_L"))
+            items.append(dict(kind="dimension", view=fv, refs=[vxl, vxh], type="DistanceX", format=REF,
+                              at=[0, yoff], name="Dim_L"))
     if want_dims and not round_part and not vert_ok:
-        skipped += ["L", "W"]                         # outline extents not resolvable from vertices
+        skipped += ["L", "W"]
     if want_dims and vyl and vyh and not round_part and vert_ok:
         pa, pb = vpt(vyl), vpt(vyh)
         right, left = max(xh - pa.x, xh - pb.x), max(pa.x - xl, pb.x - xl)
@@ -1124,15 +1242,16 @@ def part_drawing(p):
             skipped.append("W")
         else:
             xoff = ((xh - xl) * sc / 2 + 12) if right <= left else (-(xh - xl) * sc / 2 - 14)
-            items.append(dict(kind="dimension", view=fv, refs=[vyl, vyh], type="DistanceY",
-                              format="(" + R.DIM_FORMAT + ")", at=[xoff, 0], name="Dim_W"))
+            items.append(dict(kind="dimension", view=fv, refs=[vyl, vyh], type="DistanceY", at=[xoff, 0], name="Dim_W",
+                              format=(DIA + R.DIM_FORMAT + " h6") if shaft else REF))
             dimw_x = (xh + 12.0 / sc) if right <= left else (xl - 14.0 / sc)
     datums = p.get("datums", True)
     sxl = sxh = None
+    sxlv = sxhv = 0.0
     if side is not None:
         sxl, sxlv = _real_extreme(side, 0, True)
         sxh, sxhv = _real_extreme(side, 0, False)
-    if sxl and sxh and abs(sxhv - sxlv) > 0.05:      # no zero-length dimensions (round parts seen end-on)
+    if sxl and sxh and abs(sxhv - sxlv) > 0.05 and not shaft:   # shafts: seen end-on -> datum A = axis
         tw_ = abs(sxhv - sxlv) * sc
         if want_dims:
             items.append(dict(kind="dimension", view=side.Name, refs=[sxl, sxh], type="DistanceX",
@@ -1144,13 +1263,22 @@ def part_drawing(p):
             if abs(p0_.x - sxhv) < 0.02 and abs(p1_.x - sxhv) < 0.02 and abs(p1_.y - p0_.y) > 0.5:
                 cand_.append((abs(p1_.y - p0_.y), (p0_.y + p1_.y) / 2))
         ya_ = max(cand_)[1] if cand_ else 0.0          # midpoint of the longest edge on the datum face
+        k_ = abs(sxhv - sxlv) / Lz if Lz > 1e-6 else 1.0  # view-geometry units per model mm (side x-extent = Lz):
+        k_ = k_ if k_ > 1e-6 else 1.0                    # balloon origins are model mm, never edge coordinates
         if datums:
-            items.append(dict(kind="datum", view=side.Name, letter="A", origin=[sxhv, ya_], at=[sxhv + 10 / sc, ya_]))
+            items.append(dict(kind="datum", view=side.Name, letter="A", origin=[sxhv / k_, ya_ / k_],
+                              at=[sxhv / k_ + 10 / sc, ya_ / k_]))
+        if proc.get("flatness"):                       # flatness as an FCF on the datum face, not a note
+            yf_ = ya_ / k_ + (yh - yl) * 0.3
+            items.append(dict(kind="fcf", view=side.Name, cells=["flatness", str(proc["flatness"])],
+                              leader_to=[sxhv / k_, yf_], at=[sxhv / k_ + 16.0 / sc, yf_ + 6.0 / sc], name="FCF_flat",
+                              label="FCF_flat"))
     elif datums:
-        # round part seen end-on: datum A = axis of the diameter, symbol on the diameter's dimension line
+        # round part / shaft seen end-on: datum A = axis of the diameter, symbol on the end of the diameter's
+        # dimension line (aligned with the dimension line -> the feature of size / its axis)
         xd = dimw_x if dimw_x is not None else xh + 12.0 / sc
         da = dict(kind="datum", view=fv, letter="A", origin=[xd, yh + 3.0 / sc], at=[xd, yh + 12.0 / sc])
-        if dimw_x is not None:                        # move with the dimension during layout (same group)
+        if dimw_x is not None:                        # moves with the dimension during layout (same group)
             for it in items:
                 if it.get("name") == "Dim_W":
                     it["label"] = "Dim_W_g90"
@@ -1158,61 +1286,75 @@ def part_drawing(p):
         items.append(da)
 
     # ---------------- holes: callouts + position FCFs (DRF A|B|C)
-    holes, side_holes, _t = hole_table(shape) if p.get("hole_callouts", True) else ([], [], Lz)
-    tapped = p.get("tapped") or {}
-    fits = p.get("fits", proc["fits"])
+    holes, side_holes, t = F.hole_table(shape) if p.get("hole_callouts", True) else ([], [], Lz)
+    side_holes_all = list(side_holes)
     pos_floor = str(p.get("position_tolerance") or proc["pos"])
+
+    def htext(h):
+        return hole_text(h, proc.get("tapped"), proc_name, proc.get("fits"), proc, plain, t, part_name, config)
+
+    def tol_cell(d_, txt):
+        tp = txt.startswith("M") or txt.startswith("Tr")
+        thread = txt.split("x")[0].split()[0] if tp else None
+        if proc.get("fits") == "h7" and not plain and R.bearing_seat(d_, True):
+            tv, mmc_ = "0.02", False                       # bearing seat: RFS, tight
+        elif proc.get("mmc"):
+            tv, mmc_ = R.position_tol(d_, proc_name, tapped=tp, floor=float(pos_floor),
+                                      mate_clear=MATE_CLEAR.get(thread) if tp else None)
+        else:
+            tv, mmc_ = pos_floor, False                    # process tolerance, RFS
+        cell = DIA + tv + (MMC if mmc_ else "")
+        if tp and proc.get("projected") and thread in MATE_CLEAR:   # Y14.5 App. B-4 / 10.4.1: fixed fastener
+            ph = R.proj_height(part_name, thread)
+            if ph is None:
+                ph = R.PROJ_H_DEFAULT
+                w_ = "no projected height for %s %s holes: default %s mm used (pass projected_heights)" % (
+                    part_name, thread, R.mm(ph))
+                if w_ not in warnings:
+                    warnings.append(w_)
+            cell += " " + R.PROJ + R.mm(ph)
+        return cell
+
     groups = {}
     for h in holes:
-        groups.setdefault(hole_text(h, tapped, proc_name, fits), []).append(h)
+        groups.setdefault(htext(h), []).append(h)
     order = sorted(groups.items(), key=lambda kv: -kv[1][0]["r"])
     max_c = int(p.get("max_callouts", 7))
     tg = []
     for gi, (txt, hs) in enumerate(order[:max_c]):
         r = hs[0]["r"]
-        cand = [c for (_i, c) in circles if abs(c.Radius - r) < 0.02]
+        cand = _own([c for (_i, c) in circles if abs(c.Radius - r) < 0.02], hs)
+        if not cand and all(h_.get("far") for h_ in hs):  # blind from the far face: shown hidden -> FAR SIDE
+            cand = _own([c for (_i, c) in circles_all if abs(c.Radius - r) < 0.02], hs)
+            if cand:
+                txt = txt + " FAR SIDE"
         if not cand:
             continue
         c = max(cand, key=lambda c: c.Center.x + 0.3 * c.Center.y)        # instance nearest the text column
         tg.append((gi, txt, hs, r, c))
-    called = [x[1] for x in tg]
-    farside = [(t_, h_) for t_, h_ in order[:max_c] if t_ not in called]
+    called = [x[0] for x in tg]
+    farside = [(t_, h_) for gi_, (t_, h_) in enumerate(order[:max_c]) if gi_ not in called]
     over = order[max_c:]
     for t_, h_ in farside:
-        warnings.append("hole group %dX %s has no callout (no visible circle in the front view; specified in a note)"
+        warnings.append("hole group %dX %s has no callout (no circle in the front view; specified in a note)"
                         % (len(h_), t_))
     for t_, h_ in over:
         warnings.append("hole group %dX %s has no callout (beyond max_callouts=%d; specified in a note)"
                         % (len(h_), t_, max_c))
-
-    def tol_cell(d_, txt):
-        tp = bool(_tapped_thread({"r": d_ / 2.0}, tapped)) or txt.startswith("M")
-        thread = txt.split("x")[0].split()[0] if tp else None
-        if proc_name == "machined" and fits and R.bearing_seat(d_, True):
-            tv, mmc_ = "0.02", False                       # bearing seat: RFS, tight
-        elif proc["mmc"]:
-            tv, mmc_ = R.position_tol(d_, proc_name, tapped=tp, floor=float(pos_floor),
-                                      mate_clear=MATE_CLEAR.get(thread) if tp else None)
-        else:
-            tv, mmc_ = pos_floor, False                    # printed parts: process tolerance, RFS
-        cell = "⌀" + tv + ("Ⓜ" if mmc_ else "")
-        if tp and proc_name == "machined":                 # Y14.5 App. B-4 / 10.4.1: fixed fastener -> projected zone
-            ph = R.proj_height(part_name, thread)
-            if ph is None:
-                ph = R.PROJ_H_DEFAULT
-                warnings.append("no projected height for %s %s holes: default %s mm used (pass projected_heights)"
-                                % (part_name, thread, R.mm(ph)))
-            cell += " " + R.PROJ + R.mm(ph)
-        return cell
-
-    BW, BH = 56.0 / sc, 28.0 / sc                       # callout + FCF + attached datum symbol (model mm)
+    BW, BH = 56.0 / sc, 21.0 / sc                       # callout + FCF (datum symbol LEFT of the FCF), model mm
     rows = []
     DRF = R.drf(len(tg[0][2]) if tg else 0)              # pattern B clocks the part -> no C
     if len(tg) < 2:
         DRF = DRF[:2]                                    # no second hole group -> no datum C on this sheet
     letters = ["B", "C"]
-    for (gi, txt, hs, r, c) in sorted(tg, key=lambda t: t[4].Center.x):
+    roles = [t_[0] for t_ in tg]
+    for (gi, txt, hs, r, c) in sorted(tg, key=lambda t_: t_[4].Center.x):
         ox, oy = c.Center.x + r * 0.707, c.Center.y + r * 0.707
+        role = roles.index(gi)                        # datum role by rank among VISIBLE groups
+        cb_part = None
+        if datums and (role == 0 or (role == 1 and "C" in DRF)) and ("  " + CBORE) in txt:
+            txt, cb_part = txt.split("  " + CBORE, 1)   # the datum is the HOLE; the counterbore gets its own
+            cb_part = CBORE + cb_part                    # callout + FCF, so the datum symbol is unambiguous
         label = ("%dX " % len(hs) if len(hs) > 1 else "") + txt
         if topv is None:                               # 2-view sheet: blocks above the front view
             x = min(max(c.Center.x, xl + BW / 2 - 10 / sc), xh - BW / 2 + 10 / sc) if (xh - xl) > BW else (xl + xh) / 2
@@ -1229,25 +1371,93 @@ def part_drawing(p):
             x = xl - BW / 2 - 12.0 / sc
             y0 = yh - 4.0 / sc - len(rows) * BH
             rows.append([x])
-        anchors = [[cc.Center.x, cc.Center.y] for (_i, cc) in circles if abs(cc.Radius - r) < 0.02]
+        pool = circles_all if txt.endswith("FAR SIDE") else circles
+        anchors = [[cc.Center.x, cc.Center.y] for cc in _own([cc for (_i, cc) in pool if abs(cc.Radius - r) < 0.02], hs)]
         # Y14.5 Fig 6-30: the FCF sits directly below the hole callout (10.5 mm: clears the measured FCF frame)
         items.append(dict(kind="callout", view=fv, text=label, origin=[ox, oy], at=[x, y0 + 10.5 / sc],
                           name="Call_g%d" % gi, label="Call_g%d" % gi, anchors=anchors, anchor_r=r))
         if not datums:
             continue
         tcell = tol_cell(2 * r, txt)
-        if gi == 0:
+        if role == 0:
             cells = ["position", tcell, "A"]
-        elif gi == 1 and "C" in DRF:
+        elif role == 1 and "C" in DRF:
             cells = ["position", tcell, "A", "B"]          # this group IS datum C: never self-referenced
         else:
             cells = ["position", tcell] + DRF
         items.append(dict(kind="fcf", view=fv, cells=cells, at=[x, y0], name="FCF_g%d" % gi, label="FCF_g%d" % gi))
-        if gi == 0 or (gi == 1 and "C" in DRF):
-            items.append(dict(kind="datum", view=fv, letter=letters[gi], origin=[x, y0 - 3.6 / sc],
-                              at=[x, y0 - 10.0 / sc], label="Datum_%s_g%d" % (letters[gi], gi)))
-    # ---------------- bearing journals (external cylinders on a bearing bore size): fit callout
-    if proc_name == "machined" and fits:
+        if role == 0 or (role == 1 and "C" in DRF):
+            items.append(dict(kind="datum", view=fv, letter=letters[role], origin=[x, y0 - 3.6 / sc],
+                              at=[x, y0 - 10.0 / sc], label="Datum_%s_g%d" % (letters[role], gi)))
+        if cb_part:
+            rcb = hs[0]["cbore"][0] / 2.0
+            lab2 = ("%dX " % len(hs) if len(hs) > 1 else "") + cb_part
+            pool_ = circles_all if cb_part.endswith("FAR SIDE") else circles
+            anc2 = [[cc.Center.x, cc.Center.y] for (_i, cc) in pool_ if abs(cc.Radius - rcb) < 0.02 and
+                    any(abs(cc.Center.x - h_["x"]) < 0.1 and abs(abs(cc.Center.y) - abs(h_["y"])) < 0.1 for h_ in hs)]
+            items.append(dict(kind="callout", view=fv, text=lab2, origin=[c.Center.x - rcb * 0.707, c.Center.y - rcb * 0.707],
+                              at=[x, y0 - BH + 10.5 / sc], name="Call_g%d" % (30 + gi), label="Call_g%d" % (30 + gi),
+                              anchors=anc2, anchor_r=rcb))
+            items.append(dict(kind="fcf", view=fv, at=[x, y0 - BH], name="FCF_g%d" % (30 + gi), label="FCF_g%d" % (30 + gi),
+                              cells=["position", DIA + ("0.02" if "H7" in cb_part else pos_floor), "A", letters[role]]))
+    # ---------------- side holes: callout + FCF where they are seen as circles (real frames, not note text)
+    sgroups, side_called = {}, set()
+    for h in side_holes:
+        sgroups.setdefault(htext(h), []).append(h)
+    drf_s = DRF[:2] if tg else ["A"]
+    for si, (txt, hs) in enumerate(sgroups.items()):
+        r = hs[0]["r"]
+        ax_ = hs[0]["ax"]
+        vw, cand, far_ = None, [], False
+        for vw_, along, mp in ((side, 0, lambda q, sx, sy: (sx * (q.z - Lz / 2), sy * q.y)),
+                               (topv, 1, lambda q, sx, sy: (sx * q.x, sy * (q.z - Lz / 2)))):
+            if vw_ is None or abs((ax_.x, ax_.y)[along]) < 0.99:
+                continue                            # this view does not see the group as circles
+            vis_c = [c for (_i, c) in full_circles(vw_) if abs(c.Radius - r) < 0.02]
+            hid_c = [c for (_i, c) in full_circles(vw_, hidden_ok=True) if abs(c.Radius - r) < 0.02
+                     and not any(abs(c.Center.x - w.Center.x) < 0.05 and abs(c.Center.y - w.Center.y) < 0.05 for w in vis_c)]
+
+            def _hits(cs, sx, sy):
+                out_ = []
+                for h_ in hs:
+                    px, py = mp(h_["c"], sx, sy)
+                    m_ = [c for c in cs if abs(c.Center.x - px) < 0.1 and abs(c.Center.y - py) < 0.1]
+                    if not m_:
+                        return None
+                    out_.append(m_[0])
+                return out_
+            for cs, isfar in ((vis_c, False), (hid_c, True)):   # visible match first; hidden -> FAR SIDE
+                for sx in (1, -1):
+                    for sy in (1, -1):
+                        hit = _hits(cs, sx, sy)
+                        if hit and not cand:
+                            vw, cand, far_ = vw_, hit, isfar
+            if cand:
+                break
+        if vw is None:
+            continue
+        od_ = hs[0].get("open_dir")
+        if od_ is not None:                         # right view looks from +X, top view from +Y (third angle)
+            far_ = (od_.x < 0) if vw is side else (od_.y < 0)
+        if far_:
+            txt = txt + " FAR SIDE"
+        c = max(cand, key=lambda c: c.Center.x + 0.3 * c.Center.y)
+        gid = 50 + si
+        y0 = c.Center.y + r + 10.0 / sc
+        x = c.Center.x + r + 24.0 / sc
+        label = ("%dX " % len(hs) if len(hs) > 1 else "") + txt
+        items.append(dict(kind="callout", view=vw.Name, text=label, origin=[c.Center.x + r * 0.707, c.Center.y + r * 0.707],
+                          at=[x, y0 + 10.5 / sc], name="Call_g%d" % gid, label="Call_g%d" % gid,
+                          anchors=[[cc.Center.x, cc.Center.y] for cc in cand], anchor_r=r))
+        if datums:
+            items.append(dict(kind="fcf", view=vw.Name, cells=["position", tol_cell(2 * r, txt)] + drf_s, at=[x, y0],
+                              name="FCF_g%d" % gid, label="FCF_g%d" % gid))
+        side_called.add(txt.replace(" FAR SIDE", ""))
+    side_holes = [h for h in side_holes if htext(h) not in side_called]
+    # ---------------- bearing journals (external cylinders on a bearing bore size): fit callout + FCF
+    hidden_journals = []
+    journals_present = False
+    if proc.get("journals") and not plain:
         seen = set()
         for f in shape.Faces:
             srf = f.Surface
@@ -1264,58 +1474,130 @@ def part_drawing(p):
             if key in seen:
                 continue
             seen.add(key)
+            journals_present = True
             cand = [cc for (_i, cc) in circles if abs(cc.Radius - srf.Radius) < 0.02]
+            txt = "%s%s %s  Ra 0.8" % (DIA, R.mm(2 * srf.Radius), R.fit_text(2 * srf.Radius, False))
+            if not cand:                                   # journal behind the front face: FAR SIDE callout
+                cand = [cc for (_i, cc) in circles_all if abs(cc.Radius - srf.Radius) < 0.02]
+                if cand:
+                    txt += " FAR SIDE"
             if not cand:
+                hidden_journals.append(txt)
                 continue
             cc = cand[0]
             gi = 20 + len(seen)
-            txt = "⌀%s %s  Ra 0.8" % (R.mm(2 * srf.Radius), R.fit_text(2 * srf.Radius, False))
             items.append(dict(kind="callout", view=fv, text=txt,
                               origin=[cc.Center.x - srf.Radius * 0.707, cc.Center.y - srf.Radius * 0.707],
                               at=[xl - 34.0 / sc, yl + 2.0 / sc], name="Call_g%d" % gi, label="Call_g%d" % gi,
                               anchors=[[cc.Center.x, cc.Center.y]], anchor_r=srf.Radius))
+            if datums:
+                items.append(dict(kind="fcf", view=fv, cells=["position", DIA + "0.02"] + (DRF[:2] if tg else ["A"]),
+                                  at=[xl - 34.0 / sc, yl + 2.0 / sc - 10.5 / sc], name="FCF_g%d" % gi,
+                                  label="FCF_g%d" % gi))
     drf = DRF if tg else ["A"]
-    # ---------------- all-around profile of the outline
-    prof_tol = p.get("profile_tolerance", proc["prof"])
+    # ---------------- all-around profile, from the end of the part with fewer holes; ALL OVER beneath it
+    prof_tol = p.get("profile_tolerance", proc.get("prof"))
     if prof_tol:
+        ncl = sum(1 for (_i, cc) in circles if cc.Center.x < xl + 0.25 * (xh - xl))
+        ncr = sum(1 for (_i, cc) in circles if cc.Center.x > xh - 0.25 * (xh - xl))
+        px_ = (xh - 0.04 * (xh - xl)) if ncr < ncl else (xl + 0.04 * (xh - xl))
         vpts = [[q.x, q.y] for _i, q in _vertices(front)][:400]
         items.append(dict(kind="fcf", view=fv, cells=["profile_surface", str(prof_tol)] + (drf if datums else []),
-                          leader_to=[xl + 0.04 * (xh - xl), yh], at=[xl + 0.04 * (xh - xl) + 22 / sc, yh + 8 / sc],
-                          name="FCF_profile", label="FCF_profile", anchors=vpts, anchor_r=0.0))
-    # ---------------- notes
-    lines = []
+                          leader_to=[px_, yh], at=[px_ + (22 / sc if px_ < (xl + xh) / 2 else -22 / sc), yh + 8 / sc],
+                          name="FCF_profile", label="Prof_g99", anchors=vpts, anchor_r=0.0))
+        items.append(dict(kind="note", html='<html><body style="font-family:osifont; font-size:10pt;">ALL OVER</body></html>',
+                          x=float(pg.X) + px_ * sc, y=float(pg.Y) + yh * sc, width=30, name="AllOver", label="AllOver_g99"))
+    # ---------------- notes (feature-driven: no boilerplate for absent features)
+    texts = [htext(h_) for h_ in holes + side_holes_all]
+    has_threads = any(("M3x" in s_ or "M4x" in s_ or "M5x" in s_ or s_.startswith("M") or "Tr8" in s_) for s_ in texts)
     model_ref = p.get("model_ref") or os.path.basename(p.get("brep") or "") or part_name
+    dxf_ref = p.get("dxf_ref") or (os.path.splitext(model_ref)[0] + ".dxf")
+    lines = []
     if p.get("model_note", True):
-        lines.append("DIMS/TOLS PER ASME Y14.5-2018. UNDIMENSIONED GEOMETRY IS BASIC, QUERIED FROM THE MODEL "
-                     "(Y14.5 4.1(b),(c), 5.6): DEFINED BY MODEL %s%s." % (model_ref, "; PROFILE TOLERANCE APPLIES" if prof_tol else ""))
-    lines += [str(s) for s in (p.get("notes") or [])]
-    if side_holes and p.get("hole_callouts", True):
+        lines.append(("DIMS/TOLS PER ASME Y14.5-2018. UNDIMENSIONED GEOMETRY IS BASIC, DEFINED BY THE MODEL %s%s.%s%s") % (
+            model_ref, (" AND DXF " + dxf_ref) if proc_name == "plate" else "",
+            (" THE PROFILE FCF APPLIES ALL OVER EXCEPT FEATURES THAT CARRY A SIZE TOLERANCE, A FIT OR THEIR OWN FCF "
+             "(Y14.5 11.3.1.4).") if prof_tol else "",
+            " THREADED HOLES ARE MODELLED AS PLAIN HOLES: THE THREAD CALLOUT GOVERNS." if has_threads else ""))
+    names = list(p.get("instances") or [])
+    if names:
+        hand = ""
+        if len(names) > 1:
+            mirror = any(n_.endswith(("_R", "R")) for n_ in names) and any(n_.endswith(("_L", "L")) for n_ in names)
+            hand = (" %s SHOWN; %s IS ITS MIRROR IMAGE." % (names[0], ", ".join(names[1:]))
+                    if mirror and not F.symmetric(shape) else " ALL IDENTICAL (%s SHOWN)." % names[0])
+        lines.append("QTY %d%s: %s.%s" % (len(names), (" " + p["qty_per"]) if p.get("qty_per") else "", ", ".join(names), hand))
+    ft = F.features(shape)
+    for s_ in list(proc.get("notes") or []):
+        if s_ == "@CSK":
+            continue                                # countersinks are specified in the hole callouts (4.5.12)
+        if s_ == "@THREADS":
+            if not has_threads:
+                continue
+            s_ = "THREADS PER ASME B1.13M, CLASS 6H."
+        elif s_ == "@MASK":
+            if not any("H7" in x_ for x_ in texts) and not journals_present:
+                s_ = "FINISH: CLEAR ANODIZE PER MIL-A-8625 TYPE II CLASS 1."
+            else:
+                s_ = "FINISH: CLEAR ANODIZE PER MIL-A-8625 TYPE II CLASS 1; MASK ALL TOLERANCED FIT FEATURES."
+        elif s_ == "@INSERT":
+            ins = proc.get("insert_d")
+            if not ins or not any(abs(2 * h_["r"] - float(ins)) < 0.05 for h_ in holes + side_holes_all):
+                continue
+            s_ = DIA + "%s HOLES: M3 HEAT-SET INSERTS, LENGTH NOT TO EXCEED WALL/HOLE DEPTH, INSTALL AT 230 °C." % R.mm(float(ins))
+        elif s_ == "@SHAFT":
+            ng_ = ft["grooves"]
+            ops = ["CUT TO LENGTH"] + (["STEP"] if ft["step"] else []) + \
+                (["%s PER DIN 6799 SIZE 7 (%s7 x 0.94)" % ("%dX E-CLIP GROOVES" % ng_ if ng_ > 1 else "E-CLIP GROOVE", DIA)]
+                 if ng_ else []) + (["DRIVE FLATS AS MODELLED (MATE THE D-BORES)"] if ft["flat"] else [])
+            s_ = "; ".join(ops) + (". MACHINE THESE FEATURES BY GRINDING (CASE HARDENED STOCK)." if len(ops) > 1 else ".")
+        elif s_ == "@SHIMMAT":
+            s_ = ("MATERIAL: 301 STAINLESS FULL-HARD SHIM STOCK, %s mm THICK. CUT FROM STEP {step} (LASER OR PHOTO-ETCH)."
+                  % R.mm(Lz, 2) if Lz <= 0.5 else
+                  "MATERIAL: 301 STAINLESS 1/2-HARD SHEET, %s mm THICK. LASER CUT FROM STEP {step}, DEBURR." % R.mm(Lz, 2))
+        s_ = s_.replace("@THK", R.mm(Lz, 2) + " mm")
+        if "; HOLES MARKED REAM/BORE" in s_ and not any(
+                (" REAM" in x_ or " BORE" in x_.replace("D-BORE", "")) for x_ in texts):
+            s_ = s_.split("; HOLES MARKED REAM/BORE")[0] + "."       # no finished holes on this part
+        lines.append(s_.format(step=model_ref, dxf=dxf_ref))
+    for hx in ft.get("hex") or []:
+        if config.get("note_hex", True) and not any(part_name.startswith(k_) for k_ in (config.get("extra_notes") or {})):
+            lines.append("HEX DRIVE %s AF %s AS MODELLED%s." % ("HOLE" if hx["hole"] else "BOSS", R.mm(hx["af"], 2),
+                                                               " (SHARP CORNERS; RELIEF OUTSIDE THE FLATS PERMITTED)"
+                                                               if hx["hole"] else ""))
+    lines += [str(s_) for s_ in (p.get("notes") or [])]
+    if side_holes:
         sg = {}
         for h in side_holes:
-            k = hole_text(h, tapped, proc_name, fits)
-            sg[k] = sg.get(k, 0) + 1
-        lines.append("SIDE HOLES (LOCATION PER MODEL, ⌖ ⌀%s|%s): " % (pos_floor, "|".join(drf if datums else ["A"])) +
+            sg[htext(h)] = sg.get(htext(h), 0) + 1
+        lines.append("SIDE HOLES (LOCATION PER MODEL, ⌖ %s%s|%s): " % (DIA, pos_floor, "|".join(drf_s)) +
                      "; ".join("%dX %s" % (n_, s_) for s_, n_ in sg.items()))
+        warnings.append("side holes not seen as circles in any view (note only): %s" % "; ".join(sg))
     if farside or over:
-        parts_ = []
-        for t_, h_ in farside + over:
-            parts_.append("%dX %s ⌖ %s|%s" % (len(h_), t_, tol_cell(2 * h_[0]["r"], t_), "|".join(drf)))
+        parts_ = ["%dX %s ⌖ %s|%s" % (len(h_), t_, tol_cell(2 * h_[0]["r"], t_), "|".join(drf)) for t_, h_ in farside + over]
         lines.append("HOLES WITHOUT CALLOUT (LOCATION PER MODEL): " + "; ".join(parts_))
+    if hidden_journals:
+        lines.append("JOURNAL / PILOT NOT SEEN AS A CIRCLE IN THE FRONT VIEW (LOCATION PER MODEL, ⌖ %s0.02|%s): %s." % (
+            DIA, "|".join(DRF[:2] if tg else ["A"]), "; ".join(hidden_journals)))
+        warnings.append("journals without callout: %s" % "; ".join(hidden_journals))
+    for key_, txt_ in (config.get("extra_notes") or {}).items():
+        if part_name.startswith(key_):
+            lines.append(str(txt_))
     if skipped:
         lines.append("ENVELOPE %s x %s x %s (REF)." % (R.mm(xh - xl, 1), R.mm(yh - yl, 1), R.mm(Lz, 1)))
     if mass is not None:
         lines.append("MASS %s g (REF)." % R.mm(mass, 1))
     if lines:
         items.append(dict(kind="note", lines=["NOTES:"] + ["%d. %s" % (i + 1, s) for i, s in enumerate(lines)],
-                          size_pt=7, x=112 * kx, y=74 * ky, width=162 * kx, name="Notes"))
+                          size_pt=7, x=106 * kx, y=74 * ky, width=150 * kx, name="Notes"))
     if iso is not None:
         items.append(dict(kind="note", lines=["ISOMETRIC (REF)", "SCALE " + scale_txt(isc)], size_pt=8,
                           x=372 * kx, y=196 * ky, width=40, name="Cap_iso"))
     items.extend(p.get("extra_items") or [])
     ann = annotate({"doc": doc.Name, "page": page.Name, "items": items})
     res = {"doc": doc.Name, "page": page.Name, "scale": sc, "size_mm": [round(Lx, 2), round(Ly, 2), round(Lz, 2)],
-           "views": [v.Name for v in views], "annotations": len(ann["created"]), "hole_groups": len(tg),
-           "drf": drf if datums else [], "envelope_note": bool(skipped), "warnings": warnings,
+           "process": proc_name, "views": [v.Name for v in views], "annotations": len(ann["created"]),
+           "hole_groups": len(tg), "drf": drf if datums else [], "envelope_note": bool(skipped), "warnings": warnings,
            "problems": ann["problems"], "text_lint": ann["text_lint"]}
     if p.get("layout", True):
         lay = run_layout(doc, page, p)

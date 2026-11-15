@@ -113,7 +113,24 @@ def test_techdraw_tokens_and_scales():
     assert ns["_fcf_text"]({"cells": ["flatness", "0.01"]}) == "⏥|0.01"
     assert ns["pick_scale"](100, 50, 205, 150) == 2
     assert ns["scale_txt"](0.5) == "1:2" and ns["scale_txt"](3) == "3:1" and ns["scale_txt"](0.75) == "3:4"
-    assert ns["hole_text"]({"r": 1.25, "thru": False, "depth": 6.0}, {"1.25": "M3x0.5-6H"}) == "M3x0.5-6H ↧5.5"
+    # tapped blind hole: thread depth leaves >= 3P tap runout (depth - 1.5)
+    assert ns["hole_text"]({"r": 1.25, "thru": False, "depth": 6.0}, {"1.25": "M3x0.5-6H"}) == "M3x0.5-6H ↧4.5"
+    assert ns["hole_text"]({"r": 1.25, "thru": False, "depth": 6.0, "each_side": True}) == "M3x0.5-6H ↧4.5 EACH SIDE"
+    # counterbore far side, countersink with angle, bearing-seat counterbore carries the fit
+    assert ns["hole_text"]({"r": 1.65, "thru": True, "depth": 8, "cbore": (6.0, 3.0), "cb_far": True}) ==         "⌀3.3 THRU  ⌴⌀6 ↧3 FAR SIDE"
+    assert ns["hole_text"]({"r": 1.65, "thru": True, "depth": 8, "csk": (6.6, 90.0, True)}) ==         "⌀3.3 THRU  ⌵⌀6.6 X 90° FAR SIDE"
+    assert ns["hole_text"]({"r": 2.5, "thru": False, "depth": 4, "cbore": (15.0, 5.0)}) == "⌀5 ↧4  ⌴⌀15 H7 ↧5"
+    # plate: bearing seat finished REAM, never on a D-bore; plain parts (spacers) get no fit, no thread
+    assert ns["hole_text"]({"r": 5.0, "thru": True, "depth": 3}, None, "plate") == "⌀10 H7 REAM THRU"
+    assert ns["hole_text"]({"r": 5.0, "thru": True, "depth": 3, "dflat": 4.0}, None, "plate") ==         "⌀10 D-BORE, FLAT 4 FROM ℄ THRU"
+    assert ns["hole_text"]({"r": 1.25, "thru": True, "depth": 3}, None, "machined", plain=True) == "⌀2.5 THRU"
+    # config hole override (e.g. a standoff tapped from both ends) and process profiles from config
+    cfg = {"hole_overrides": [{"names": "Standoff", "diameter": 2.54, "tol": 0.1,
+                               "text": "{dia}2.5 THRU; M3x0.5-6H {depth}{tap_depth} BOTH ENDS"}],
+           "processes": {"AL": {"base": "machined", "pos": "0.03"}}}
+    assert ns["hole_text"]({"r": 1.27, "thru": True, "depth": 30}, t=30.0, name="FA_Standoff", config=cfg) ==         "⌀2.5 THRU; M3x0.5-6H ↧8 BOTH ENDS"
+    al = ns["process_profile"]("AL", cfg)
+    assert al["pos"] == "0.03" and al["fits"] == "h7" and ns["process_profile"]("plate")["two_view"]
     # Y14.5 4.3.1: metric values without trailing zeros (was "↧3.0")
     assert ns["hole_text"]({"r": 1.65, "thru": True, "depth": 3, "cbore": (6.5, 3.0)}) == \
         "⌀3.3 THRU  ⌴⌀6.5 ↧3"

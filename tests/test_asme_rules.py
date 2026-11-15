@@ -126,7 +126,7 @@ def _layout():
     import sys
     import types
 
-    saved = {k: sys.modules.get(k) for k in ("FreeCAD", "FreeCADGui")}
+    saved = {k: sys.modules.get(k) for k in ("FreeCAD", "FreeCADGui", "Part")}
     for k in saved:
         sys.modules[k] = types.ModuleType(k)
     try:
