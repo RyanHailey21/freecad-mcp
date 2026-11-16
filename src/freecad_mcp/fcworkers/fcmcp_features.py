@@ -184,14 +184,18 @@ def hole_table(shape, r_min=R_MIN, r_max=R_MAX, dflat_min=DFLAT_MIN):
                 base["cbore"] = (2 * big["r"], big["depth"])
                 rx_ = base["x"] + (base["r"] + big["r"]) / 2.0      # probe in the counterbore RING (the axis is
                 base["cb_far"] = not _open(rx_, base["y"], big["z1"] + 0.3)   # the hole's void): material above = far
-        same = [h_ for h_ in hs if abs(h_["r"] - base["r"]) < 0.02]
+        same = sorted((h_ for h_ in hs if abs(h_["r"] - base["r"]) < 0.02), key=lambda h_: h_["z0"])
         base["each_side"] = False
+
+        def _solid_gap(a, b):                      # material on the axis between two coaxial holes; a void there
+            return b["z0"] > a["z1"] + 0.1 and \
+                not _open(a["x"], a["y"], (a["z1"] + b["z0"]) / 2.0)   # (a cavity) makes one straight-through column
         if len(same) == 2 and not any(h_["thru"] for h_ in same) and \
-                same[0]["z0"] <= zmin + 0.01 and same[1]["z1"] >= zmax - 0.01 and same[0]["z1"] < same[1]["z0"] - 0.1:
+                same[0]["z0"] <= zmin + 0.01 and same[1]["z1"] >= zmax - 0.01 and _solid_gap(same[0], same[1]):
             base["each_side"] = True                    # two blind holes, one from each face, material between
             base["depth"] = max(same[0]["depth"], same[1]["depth"])
         elif len(same) >= 2 and not any(h_["thru"] for h_ in same) and \
-                any(same[i_]["z1"] < same[i_ + 1]["z0"] - 0.1 for i_ in range(len(same) - 1)):
+                any(_solid_gap(same[i_], same[i_ + 1]) for i_ in range(len(same) - 1)):
             # coaxial blind holes opening on DIFFERENT faces (e.g. into a pocket and from the top), with material
             # between: separate holes, each with its own side - never one "THRU" column (arm sync, ARC-106)
             same.sort(key=lambda h_: h_["z0"])

@@ -39,6 +39,8 @@ FIXTURES = textwrap.dedent(r'''
     out["side_pair"] = table(plate().cut(cyl(1.5, 8, 0, 20, 5, V(1, 0, 0))).cut(cyl(1.5, 8, 32, 20, 5, V(1, 0, 0))))
     stepped = Part.makeBox(40, 30, 30).cut(Part.makeBox(10, 10, 10, V(5, 17, 0)))   # pocket open to the bottom
     out["coaxial_split"] = table(stepped.cut(cyl(1.25, 6, 10, 22, 10)).cut(cyl(1.25, 6, 10, 22, 24)))
+    hollow = Part.makeBox(40, 30, 20).cut(Part.makeBox(36, 26, 16, V(2, 2, 2)))       # closed box, 2 mm walls
+    out["cavity_column"] = table(hollow.cut(cyl(1.5, 2, 10, 15, 0)).cut(cyl(1.5, 2, 10, 15, 18)))
     disc = Part.makeCylinder(15, 6)
     dcut = Part.makeBox(10, 20, 6, V(2.5, -10, 0))                             # flat 2.5 from the axis
     out["dbore"] = table(disc.cut(cyl(3, 6, 0, 0).cut(dcut)))
@@ -146,3 +148,9 @@ def test_coaxial_blind_holes_from_different_faces_stay_separate(res):
     assert not low["thru"] and not top["thru"]
     assert low["far"] and not top["far"]                      # opens downward into the pocket / from the top
     assert low["depth"] == pytest.approx(6) and top["depth"] == pytest.approx(6)
+
+
+def test_coaxial_holes_into_a_cavity_are_thru_not_each_side(res):
+    """ARC-139/131: floor and roof holes on one axis with a void (not material) between: one THRU column."""
+    h = one(res, "cavity_column")
+    assert h["thru"] and not h["each_side"] and not h["far"], h
