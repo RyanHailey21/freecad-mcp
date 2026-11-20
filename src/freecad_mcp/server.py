@@ -1,5 +1,6 @@
 import functools
 import logging
+import time
 import xmlrpc.client
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Dict, Literal
@@ -15,6 +16,7 @@ except ImportError:
 from mcp.types import ImageContent, TextContent
 
 from .beautify import beautify_operation
+from .jobs import SYNC_BUDGET_S, WAIT_CAP_S, run_with_deadline
 from .freecad_client import FreeCADConnection
 from .freecad_launcher import FreeCADLaunchError, ensure_freecad_running
 from .operations import (
@@ -82,12 +84,39 @@ mcp = FastMCP(
 )
 
 
+# Tools that must answer directly: they are how a handed-off job is read back.
+_NO_HANDOFF = frozenset({"job_status", "job_cancel"})
+
+
+def _handoff_response(name: str, job: Any) -> ToolResponse:
+    import json
+    body = {
+        "status": "running",
+        "job_id": job.id,
+        "tool": name,
+        "elapsed_s": round(time.time() - job.started, 1),
+        "note": (f"{name} is still running after {SYNC_BUDGET_S:g} s. MCP clients abort calls at "
+                 "about 60 s, so it continues on the server as a background job and its result "
+                 f"is kept. Call job_status(job_id=\"{job.id}\", wait_s={WAIT_CAP_S:g}) until state "
+                 "is done. Do not re-run the call: the first one is still working."),
+    }
+    return [TextContent(type="text", text=json.dumps(body, indent=1))]
+
+
 def tool(fn: Callable[..., ToolResponse]) -> Callable[..., ToolResponse]:
-    """Register ``fn`` as a tool whose next reply carries a pending version warning."""
+    """Register ``fn`` as a tool whose next reply carries a pending version warning.
+
+    A call still running after SYNC_BUDGET_S is handed to the job queue (see
+    jobs.run_with_deadline) so the client's request timeout cannot lose it.
+    """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> ToolResponse:
-        response = fn(*args, **kwargs)
+        if fn.__name__ in _NO_HANDOFF:
+            response = fn(*args, **kwargs)
+        else:
+            kind, value = run_with_deadline(fn.__name__, lambda: fn(*args, **kwargs))
+            response = value if kind == "done" else _handoff_response(fn.__name__, value)
         notice, state.version_notice = state.version_notice, None
         if notice:
             return [TextContent(type="text", text=f"Warning: {notice}"), *response]
@@ -598,8 +627,9 @@ def execute_code(
             budgets, overriding the 90 s default for this call (capped at 1800).
             Raise it for slow work that must
             run on the GUI thread, such as importing or exporting a large STEP
-            assembly. Without it the call reports a timeout while the task keeps
-            running, and the result is lost even though the work finishes. Prefer
+            assembly. The MCP client still aborts any call at about 60 s, so a
+            call running past the server's sync budget (50 s) returns a job id;
+            read the result with job_status instead of re-running. Prefer
             execute_code_async for heavy pure-geometry work that touches neither
             the document nor the GUI.
 

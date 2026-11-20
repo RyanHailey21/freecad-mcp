@@ -18,7 +18,7 @@ from typing import Any, Callable
 from mcp.types import ImageContent, TextContent
 
 from .gui_lib import run_gui, run_headless_lib
-from .jobs import JOBS, run_or_queue
+from .jobs import JOBS, WAIT_CAP_S, run_or_queue
 
 _GUISIDE = Path(__file__).with_name("guiside")
 
@@ -59,14 +59,21 @@ def register(tool: Callable, state: Any, get_connection: Callable[[], Any]) -> N
 
         Args:
             job_id: Job id; empty lists all jobs (newest first, results omitted).
-            wait_s: Block up to this many seconds (max 60) for the job to finish before answering,
-                so polling needs few calls.
+            wait_s: Block up to this many seconds (max 45, under the client's ~60 s call limit)
+                for the job to finish before answering, so polling needs few calls.
+
+        Also reads back any tool call that was handed off as a job because it ran past
+        the server's sync budget; its original reply (text and images) follows the summary.
         """
         if not job_id:
             return _text([j.summary(with_result=False) for j in JOBS.list()])
-        job = JOBS.wait(job_id, min(60.0, max(0.0, wait_s)))
+        job = JOBS.wait(job_id, min(WAIT_CAP_S, max(0.0, wait_s)))
         if job is None:
             return _text({"status": "error", "error": f"unknown job {job_id}"})
+        res = job.result
+        if (job.state == "done" and isinstance(res, list) and res
+                and all(isinstance(x, (TextContent, ImageContent)) for x in res)):
+            return [*_text(job.summary(with_result=False)), *res]
         return _text(job.summary())
 
     @tool
